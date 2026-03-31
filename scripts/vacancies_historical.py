@@ -8,6 +8,17 @@ import os
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
+# Количество дней истории (из GitHub Actions или по умолчанию 30)
+days = int(os.getenv('DAYS', '31'))
+
+end_date = datetime.now().date()
+start_date = end_date - timedelta(days=days)
+
+date_from = start_date.strftime("%Y-%m-%d")
+date_to = end_date.strftime("%Y-%m-%d")
+
+print(f"Сбор за последние {days} дней: {date_from} - {date_to}")
+
 load_dotenv()
 
 # Подключение к Supabase
