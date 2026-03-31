@@ -90,10 +90,22 @@ def enrich_with_professional_roles(vacancy):
     return None, None
 
 def get_existing_ids():
-    """Получает список существующих ID вакансий из базы"""
+    """Получает список всех существующих ID вакансий из базы"""
     try:
-        response = supabase.table("vacancies").select("id").execute()
-        return set(row['id'] for row in response.data)
+        all_ids = []
+        page = 0
+        page_size = 1000
+        
+        while True:
+            response = supabase.table("vacancies").select("id").range(page * page_size, (page + 1) * page_size - 1).execute()
+            if not response.data:
+                break
+            all_ids.extend([row['id'] for row in response.data])
+            if len(response.data) < page_size:
+                break
+            page += 1
+        
+        return set(all_ids)
     except Exception as e:
         print(f"Ошибка при получении существующих ID: {e}")
         return set()
