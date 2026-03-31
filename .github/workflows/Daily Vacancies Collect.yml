@@ -1,0 +1,28 @@
+name: Daily Vacancies Collect
+
+on:
+  schedule:
+    # Запуск в 18:00 UTC = 21:00 MSK
+    - cron: '0 18 * * *'
+  workflow_dispatch:  # ручной запуск
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      
+      - name: Run daily vacancies collector
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python scripts/vacancies_daily.py
