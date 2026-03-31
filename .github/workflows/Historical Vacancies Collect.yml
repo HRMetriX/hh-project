@@ -1,0 +1,32 @@
+name: Historical Vacancies Collect
+
+on:
+  workflow_dispatch:  # ручной запуск
+    inputs:
+      days:
+        description: 'Количество дней истории (по умолчанию 30)'
+        required: false
+        default: '30'
+        type: string
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      
+      - name: Run historical vacancies collector
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          DAYS: ${{ inputs.days }}
+        run: python scripts/vacancies_historical.py
