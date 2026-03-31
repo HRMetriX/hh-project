@@ -1,0 +1,29 @@
+name: Daily Currency Collect
+
+on:
+  schedule:
+    # Запуск в 04:00 UTC = 07:00 MSK (летом разница 3 часа)
+    # Если нужна точная привязка к Москве, используем 04:00 UTC
+    - cron: '0 4 * * *'
+  workflow_dispatch:  # возможность ручного запуска
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      
+      - name: Run daily currency collector
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python scripts/daily_currency.py
