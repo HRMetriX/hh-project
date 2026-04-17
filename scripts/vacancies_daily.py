@@ -7,6 +7,7 @@ import os
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import json
+import random
 
 load_dotenv()
 
@@ -17,23 +18,94 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 BASE_URL = "https://api.hh.ru"
 
-# Настройка сессии
-session = requests.Session()
-retry_strategy = Retry(
-    total=3,
-    backoff_factor=1,
-    status_forcelist=[429, 500, 502, 503, 504],
-)
-adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=10)
-session.mount("https://", adapter)
-session.mount("http://", adapter)
+# ========== НОВЫЕ НАСТРОЙКИ ДЛЯ ОБХОДА БЛОКИРОВКИ ==========
+def create_session_with_rotation():
+    """Создает сессию с ротацией User-Agent и дополнительными заголовками"""
+    session = requests.Session()
+    
+    # Расширенный список User-Agent для ротации
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0"
+    ]
+    
+    session.headers.update({
+        "User-Agent": random.choice(user_agents),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Referer": "https://hh.ru/",
+        "Origin": "https://hh.ru",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache"
+    })
+    
+    # Настройка retry с увеличенными задержками
+    retry_strategy = Retry(
+        total=5,
+        backoff_factor=2,  # Увеличиваем задержку между попытками
+        status_forcelist=[429, 500, 502, 503, 504, 403],  # Добавляем 403 в retry
+        allowed_methods=["GET"]
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=10)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    
+    return session
 
-headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json",
-    "Accept-Encoding": "gzip, deflate",
-    "Connection": "keep-alive"
-}
+def add_delay():
+    """Случайная задержка для имитации человеческого поведения"""
+    delay = random.uniform(1.0, 3.0)
+    time.sleep(delay)
+
+def get_with_retry(session, url, params=None, max_attempts=3):
+    """Запрос с повторными попытками и сменой User-Agent при 403"""
+    for attempt in range(max_attempts):
+        try:
+            # Меняем User-Agent при повторных попытках
+            if attempt > 0:
+                user_agents = [
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+                ]
+                session.headers.update({"User-Agent": random.choice(user_agents)})
+                print(f"   🔄 Попытка {attempt + 1}/{max_attempts} с новым User-Agent")
+                add_delay()  # Добавляем задержку перед повторной попыткой
+            
+            response = session.get(url, params=params, timeout=30)
+            
+            if response.status_code == 403:
+                print(f"   ⚠️ Получен 403 Forbidden (попытка {attempt + 1})")
+                
+                # Проверяем наличие куки с капчей
+                if 'captcha' in response.text.lower() or 'ddos-guard' in response.headers.get('Server', '').lower():
+                    print("   🛡️ Обнаружена защита DDoS-Guard. Увеличиваем задержку...")
+                    time.sleep(random.uniform(5, 10))  # Длинная пауза
+                
+                if attempt < max_attempts - 1:
+                    continue
+            
+            return response
+            
+        except Exception as e:
+            print(f"   ❌ Ошибка запроса: {e}")
+            if attempt < max_attempts - 1:
+                time.sleep(random.uniform(2, 5))
+                continue
+            raise
+    
+    return response
+
+# Создаем сессию с защитой от блокировки
+session = create_session_with_rotation()
 
 # Кэши
 city_coords_cache = {}
@@ -44,76 +116,90 @@ def diagnose_response(response, context=""):
     print(f"\n🔍 ДИАГНОСТИКА ОТВЕТА [{context}]")
     print(f"   Status Code: {response.status_code}")
     print(f"   URL: {response.url}")
-    print(f"   Headers: {dict(response.headers)}")
+    
+    # Проверка на блокировку
+    if response.status_code == 403:
+        print("   🚫 ДОСТУП ЗАБЛОКИРОВАН (403 Forbidden)")
+        print(f"   Server: {response.headers.get('Server', 'N/A')}")
+        
+        if 'ddos-guard' in response.headers.get('Server', '').lower():
+            print("   ⚠️ Сработала защита DDoS-Guard от hh.ru")
+            print("   💡 РЕШЕНИЕ: Нужно использовать прокси или VPN")
+            print("   💡 ИЛИ: Подождать 30-60 минут и попробовать снова")
+        
+        try:
+            error_data = response.json()
+            print(f"   Ошибка API: {json.dumps(error_data, ensure_ascii=False)}")
+        except:
+            pass
     
     # Проверка на капчу
-    if 'captcha' in response.text.lower() or response.status_code == 403:
-        print("   ⚠️ ОБНАРУЖЕНА КАПЧА ИЛИ БЛОКИРОВКА!")
-        if 'X-Captcha-Required' in response.headers:
-            print(f"   X-Captcha-Required: {response.headers['X-Captcha-Required']}")
-    
-    # Проверка на редирект
-    if response.history:
-        print(f"   🔄 Были редиректы: {len(response.history)}")
-        for i, resp in enumerate(response.history):
-            print(f"      {i+1}: {resp.status_code} -> {resp.headers.get('Location', 'N/A')}")
-    
-    # Проверка на ошибки HH
-    try:
-        data = response.json()
-        if 'errors' in data:
-            print(f"   ❌ API вернул ошибки: {json.dumps(data['errors'], ensure_ascii=False, indent=2)}")
-        if 'description' in data and response.status_code != 200:
-            print(f"   📝 Описание ошибки: {data.get('description', 'N/A')}")
-    except:
-        print("   ⚠️ Ответ не является валидным JSON")
-        print(f"   Первые 500 символов ответа: {response.text[:500]}")
+    if 'captcha' in response.text.lower():
+        print("   🤖 ОБНАРУЖЕНА КАПЧА!")
+        print("   💡 Требуется ручное решение капчи в браузере")
     
     return response
 
-def test_api_accessibility():
-    """Тестирование доступности API"""
-    print("\n🧪 ТЕСТИРОВАНИЕ ДОСТУПНОСТИ API")
+def test_connection():
+    """Тестирование соединения с разными методами"""
+    print("\n🧪 ТЕСТИРОВАНИЕ СОЕДИНЕНИЯ С HH.RU")
     
-    # Тест 1: Базовый запрос без параметров
-    print("\n1. Базовый запрос /vacancies")
+    # Тест 1: Прямой запрос к главной странице
+    print("\n1. Проверка доступности hh.ru:")
     try:
-        response = session.get(f"{BASE_URL}/vacancies", headers=headers, timeout=10)
-        diagnose_response(response, "базовый запрос")
+        test_session = requests.Session()
+        test_session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
+        response = test_session.get("https://hh.ru", timeout=10)
+        print(f"   Статус: {response.status_code}")
         if response.status_code == 200:
-            data = response.json()
-            print(f"   ✅ API отвечает. Найдено вакансий всего: {data.get('found', 'N/A')}")
-    except Exception as e:
-        print(f"   ❌ Ошибка соединения: {e}")
-    
-    # Тест 2: Запрос с минимальными фильтрами
-    print("\n2. Запрос с минимальными фильтрами (только Россия, без дат)")
-    try:
-        params = {"area": 113, "per_page": 1}
-        response = session.get(f"{BASE_URL}/vacancies", params=params, headers=headers, timeout=10)
-        diagnose_response(response, "минимальные фильтры")
-        if response.status_code == 200:
-            data = response.json()
-            print(f"   ✅ С фильтром area=113 найдено: {data.get('found', 'N/A')}")
+            print("   ✅ Сайт доступен")
+        else:
+            print(f"   ⚠️ Сайт вернул {response.status_code}")
     except Exception as e:
         print(f"   ❌ Ошибка: {e}")
     
-    # Тест 3: Проверка dictionaries (справочники)
-    print("\n3. Проверка справочников API")
+    # Тест 2: API справочников (обычно менее защищен)
+    print("\n2. Проверка API справочников:")
     try:
-        response = session.get(f"{BASE_URL}/dictionaries", headers=headers, timeout=10)
+        response = session.get(f"{BASE_URL}/dictionaries", timeout=10)
+        print(f"   Статус: {response.status_code}")
         if response.status_code == 200:
-            print("   ✅ Справочники доступны")
+            print("   ✅ API справочников доступен")
         else:
-            print(f"   ⚠️ Статус справочников: {response.status_code}")
+            print(f"   ⚠️ Статус: {response.status_code}")
     except Exception as e:
-        print(f"   ❌ Ошибка справочников: {e}")
+        print(f"   ❌ Ошибка: {e}")
+    
+    # Тест 3: API вакансий с паузой
+    print("\n3. Проверка API вакансий (с паузой):")
+    time.sleep(2)
+    try:
+        response = get_with_retry(session, f"{BASE_URL}/vacancies", params={"per_page": 1})
+        diagnose_response(response, "тест вакансий")
+        if response.status_code == 200:
+            data = response.json()
+            print(f"   ✅ API вакансий доступен. Найдено: {data.get('found', 0)}")
+        elif response.status_code == 403:
+            print("   🚫 API вакансий заблокирован!")
+            print("   💡 ВАШ IP ВРЕМЕННО ЗАБЛОКИРОВАН HH.RU")
+            print("   💡 Варианты решения:")
+            print("      1. Подождать 1-2 часа")
+            print("      2. Использовать VPN/прокси")
+            print("      3. Запустить скрипт с другого IP")
+            return False
+    except Exception as e:
+        print(f"   ❌ Ошибка: {e}")
+        return False
+    
+    return True
 
 def get_city_coords(area_id):
     if area_id in city_coords_cache:
         return city_coords_cache[area_id]
     try:
-        response = session.get(f"{BASE_URL}/areas/{area_id}", headers=headers, timeout=10)
+        response = get_with_retry(session, f"{BASE_URL}/areas/{area_id}")
         if response.status_code == 200:
             area_data = response.json()
             coords = {'lat': area_data.get('lat'), 'lng': area_data.get('lng')}
@@ -127,7 +213,7 @@ def get_employer_industries(employer_id):
     if employer_id in employer_industries_cache:
         return employer_industries_cache[employer_id]
     try:
-        response = session.get(f"{BASE_URL}/employers/{employer_id}", headers=headers, timeout=10)
+        response = get_with_retry(session, f"{BASE_URL}/employers/{employer_id}")
         if response.status_code == 200:
             employer_data = response.json()
             industries = employer_data.get('industries', [])
@@ -205,25 +291,28 @@ def insert_vacancies_batch(rows):
 # ========== ОСНОВНОЙ КОД ==========
 
 print("=" * 80)
-print("ЕЖЕДНЕВНЫЙ СБОР ВАКАНСИЙ (С ДИАГНОСТИКОЙ)")
+print("ЕЖЕДНЕВНЫЙ СБОР ВАКАНСИЙ (С ЗАЩИТОЙ ОТ БЛОКИРОВКИ)")
 print("=" * 80)
 
-# Сначала тестируем доступность API
-test_api_accessibility()
-
-# Параметры сбора
-analytics_roles = [10, 148, 150, 156, 164, 165]
-
-# Вчера и сегодня
-today = datetime.now().date()
-yesterday = today - timedelta(days=1)
-
-date_from = yesterday.strftime("%Y-%m-%d")
-date_to = (today + timedelta(days=1)).strftime("%Y-%m-%d")  # +1 день чтобы захватить сегодня
+# Тестируем соединение
+if not test_connection():
+    print("\n❌ НЕТ ДОСТУПА К API. Скрипт остановлен.")
+    print("📧 Рекомендуется настроить прокси или VPN для обхода блокировки.")
+    exit(1)
 
 print("\n" + "=" * 80)
 print("ПАРАМЕТРЫ ПОИСКА")
 print("=" * 80)
+
+# Параметры сбора
+analytics_roles = [10, 148, 150, 156, 164, 165]
+
+# Даты
+today = datetime.now().date()
+yesterday = today - timedelta(days=1)
+date_from = yesterday.strftime("%Y-%m-%d")
+date_to = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+
 print(f"Период: {date_from} - {date_to}")
 print(f"Роли: {analytics_roles}")
 
@@ -244,214 +333,170 @@ params = {
 print("\n" + "=" * 80)
 print("ЗАПРОС К API")
 print("=" * 80)
-print(f"Параметры запроса: {json.dumps(params, ensure_ascii=False, indent=2)}")
 
-# Получаем первую страницу с диагностикой
-print("\nЗапрос первой страницы...")
-try:
-    response = session.get(f"{BASE_URL}/vacancies", params=params, headers=headers, timeout=30)
-    diagnose_response(response, "основной запрос")
-    data = response.json()
-except Exception as e:
-    print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
-    
-    # Пробуем запрос без дат для проверки
-    print("\n🔧 ПРОБУЕМ ЗАПРОС БЕЗ ДАТ (для диагностики)...")
-    test_params = params.copy()
-    del test_params["date_from"]
-    del test_params["date_to"]
-    try:
-        test_response = session.get(f"{BASE_URL}/vacancies", params=test_params, headers=headers, timeout=30)
-        diagnose_response(test_response, "тестовый запрос без дат")
-        test_data = test_response.json()
-        print(f"   Без фильтра дат найдено: {test_data.get('found', 0)} вакансий")
-    except Exception as test_e:
-        print(f"   ❌ Даже тестовый запрос упал: {test_e}")
-    
-    raise
+# Добавляем задержку перед основным запросом
+print("\n⏳ Пауза 5 секунд перед запросом...")
+time.sleep(5)
 
+# Основной запрос с защитой
+print("Выполнение основного запроса...")
+response = get_with_retry(session, f"{BASE_URL}/vacancies", params=params, max_attempts=3)
+diagnose_response(response, "основной запрос")
+
+if response.status_code != 200:
+    print("\n❌ Не удалось получить данные от API")
+    if response.status_code == 403:
+        print("💡 ВАШ IP ЗАБЛОКИРОВАН. Рекомендации:")
+        print("   1. Подождите 1-2 часа и запустите скрипт снова")
+        print("   2. Используйте VPN (например, ProtonVPN бесплатный)")
+        print("   3. Настройте прокси в скрипте")
+    exit(1)
+
+data = response.json()
 total_found = data.get('found', 0)
 pages = min(data.get('pages', 0), 20)
 
 print(f"\n📊 РЕЗУЛЬТАТЫ ПОИСКА:")
-print(f"   Всего вакансий в HH: {total_found}")
+print(f"   Всего вакансий: {total_found}")
 print(f"   Доступно страниц: {pages}")
-print(f"   Вакансий на первой странице: {len(data.get('items', []))}")
-
-# Проверяем, есть ли хоть что-то в items
-if total_found == 0 and len(data.get('items', [])) == 0:
-    print("\n⚠️ АНАЛИЗ ПРИЧИН НУЛЕВОГО РЕЗУЛЬТАТА:")
-    print("   1. Проверяем валидность professional_role ID")
-    
-    # Проверяем, существуют ли такие роли
-    try:
-        roles_response = session.get(f"{BASE_URL}/professional_roles", headers=headers, timeout=10)
-        if roles_response.status_code == 200:
-            all_roles = {r['id']: r['name'] for r in roles_response.json().get('categories', []) 
-                        for item in r.get('roles', []) if 'roles' in r 
-                        for r in [item]}
-            for role_id in analytics_roles:
-                if role_id in all_roles:
-                    print(f"      ✅ Роль {role_id}: {all_roles[role_id]}")
-                else:
-                    print(f"      ❌ Роль {role_id}: НЕ НАЙДЕНА В СПРАВОЧНИКЕ!")
-    except:
-        pass
-    
-    print(f"   2. Фильтр 'only_with_salary': {params['only_with_salary']}")
-    print(f"   3. Фильтр 'area': {params['area']} (Россия)")
-    print(f"   4. Даты: {date_from} - {date_to}")
-    
-    # Тестовый запрос без зарплаты
-    print("\n🔧 ПРОВЕРКА БЕЗ ФИЛЬТРА ЗАРПЛАТЫ:")
-    test_params = params.copy()
-    test_params["only_with_salary"] = False
-    test_params["per_page"] = 1
-    try:
-        test_response = session.get(f"{BASE_URL}/vacancies", params=test_params, headers=headers, timeout=30)
-        test_data = test_response.json()
-        print(f"   Без фильтра зарплаты найдено: {test_data.get('found', 0)} вакансий")
-        if test_data.get('found', 0) > 0:
-            print("   👉 ПРОБЛЕМА В ФИЛЬТРЕ ЗАРПЛАТЫ - за период нет вакансий с указанной ЗП")
-    except:
-        pass
 
 if total_found == 0:
-    print("\n✅ СКРИПТ ЗАВЕРШЕН: Нет вакансий за указанный период")
-    print("   Это нормально, если за вчера не было релевантных публикаций")
-else:
-    # Собираем ID всех вакансий
-    all_vacancy_ids = []
-    for page in range(pages):
-        params["page"] = page
-        try:
-            response = session.get(f"{BASE_URL}/vacancies", params=params, headers=headers, timeout=30)
+    print("\n✅ Нет новых вакансий за период")
+    exit(0)
+
+# Сбор вакансий (остальная часть без изменений)
+all_vacancy_ids = []
+for page in range(pages):
+    params["page"] = page
+    try:
+        add_delay()  # Добавляем случайную задержку между запросами
+        response = get_with_retry(session, f"{BASE_URL}/vacancies", params=params)
+        
+        if response.status_code == 200:
             page_data = response.json()
             for item in page_data.get('items', []):
                 all_vacancy_ids.append(item['id'])
-            print(f"Страница {page+1}: собрано {len(all_vacancy_ids)} ID")
-            time.sleep(0.5)
-        except Exception as e:
-            print(f"Ошибка страницы {page+1}: {e}")
+            print(f"📄 Страница {page+1}/{pages}: +{len(page_data.get('items', []))} ID")
+        else:
+            print(f"⚠️ Ошибка страницы {page+1}: статус {response.status_code}")
             continue
-    
-    # Фильтруем только новые ID
-    new_ids = [vid for vid in all_vacancy_ids if vid not in existing_ids]
-    print(f"\nВсего ID: {len(all_vacancy_ids)}")
-    print(f"Новых ID (ещё нет в базе): {len(new_ids)}")
-    
-    if not new_ids:
-        print("Нет новых вакансий для загрузки")
-    else:
-        print("\nСбор полных данных...")
-        vacancies_batch = []
-        errors = []
-        start_total = time.time()
-        inserted_total = 0
-        
-        for i, vac_id in enumerate(new_ids):
-            print(f"[{i+1}/{len(new_ids)}] Загрузка {vac_id}")
             
-            try:
-                response = session.get(f"{BASE_URL}/vacancies/{vac_id}", headers=headers, timeout=30)
-                
-                if response.status_code == 200:
-                    vacancy = response.json()
-                    
-                    lat, lng, coords_source = enrich_with_coordinates(vacancy)
-                    main_industry, main_industry_id = enrich_with_industries(vacancy)
-                    main_role, main_role_id = enrich_with_professional_roles(vacancy)
-                    
-                    # Маппинг BYR -> BYN
-                    salary_currency = vacancy.get('salary', {}).get('currency') if vacancy.get('salary') else None
-                    if salary_currency == 'BYR':
-                        salary_currency = 'BYN'
-                    
-                    row = {
-                        'id': vacancy.get('id'),
-                        'name': vacancy.get('name'),
-                        'published_at': vacancy.get('published_at'),
-                        'created_at': vacancy.get('created_at'),
-                        'initial_created_at': vacancy.get('initial_created_at'),
-                        'alternate_url': vacancy.get('alternate_url'),
-                        'salary_from': vacancy.get('salary', {}).get('from') if vacancy.get('salary') else None,
-                        'salary_to': vacancy.get('salary', {}).get('to') if vacancy.get('salary') else None,
-                        'salary_currency': salary_currency,
-                        'salary_gross': vacancy.get('salary', {}).get('gross') if vacancy.get('salary') else None,
-                        'area_id': vacancy.get('area', {}).get('id'),
-                        'area_name': vacancy.get('area', {}).get('name'),
-                        'lat': lat,
-                        'lng': lng,
-                        'coords_source': coords_source,
-                        'address_raw': vacancy.get('address', {}).get('raw') if vacancy.get('address') else None,
-                        'employer_id': vacancy.get('employer', {}).get('id'),
-                        'employer_name': vacancy.get('employer', {}).get('name'),
-                        'employer_accredited_it': vacancy.get('employer', {}).get('accredited_it_employer'),
-                        'employer_trusted': vacancy.get('employer', {}).get('trusted'),
-                        'employer_main_industry': main_industry,
-                        'employer_main_industry_id': main_industry_id,
-                        'professional_role': main_role,
-                        'professional_role_id': main_role_id,
-                        'experience_id': vacancy.get('experience', {}).get('id'),
-                        'experience_name': vacancy.get('experience', {}).get('name'),
-                        'employment_name': vacancy.get('employment', {}).get('name'),
-                        'schedule_name': vacancy.get('schedule', {}).get('name'),
-                        'accept_temporary': vacancy.get('accept_temporary'),
-                        'accept_labor_contract': vacancy.get('accept_labor_contract'),
-                        'internship': vacancy.get('internship'),
-                        'night_shifts': vacancy.get('night_shifts'),
-                        'work_format': ', '.join([f.get('name', '') for f in vacancy.get('work_format', [])]),
-                        'working_hours': ', '.join([h.get('name', '') for h in vacancy.get('working_hours', [])]),
-                        'work_schedule_by_days': ', '.join([s.get('name', '') for s in vacancy.get('work_schedule_by_days', [])]),
-                        'key_skills': ', '.join([s.get('name', '') for s in vacancy.get('key_skills', [])]),
-                        'has_test': vacancy.get('has_test'),
-                        'test_required': vacancy.get('test', {}).get('required') if vacancy.get('test') else None,
-                        'archived': vacancy.get('archived'),
-                        'response_letter_required': vacancy.get('response_letter_required'),
-                        'premium': vacancy.get('premium'),
-                        'billing_type': vacancy.get('billing_type', {}).get('id') if vacancy.get('billing_type') else None,
-                    }
-                    
-                    vacancies_batch.append(row)
-                    print(f"  ✅ Собрано. Всего в батче: {len(vacancies_batch)}")
-                    
-                    # Вставляем каждые 50 строк
-                    if len(vacancies_batch) >= 50:
-                        inserted = insert_vacancies_batch(vacancies_batch)
-                        inserted_total += inserted
-                        print(f"  📦 Вставлено в БД: {inserted}")
-                        vacancies_batch = []
-                    
-                else:
-                    errors.append(vac_id)
-                    print(f"  ❌ Ошибка {response.status_code}")
-                    diagnose_response(response, f"вакансия {vac_id}")
-                    
-            except Exception as e:
-                errors.append(vac_id)
-                print(f"  ❌ Исключение: {e}")
-            
-            time.sleep(0.3)
-            
-            if (i + 1) % 50 == 0:
-                elapsed = time.time() - start_total
-                avg = elapsed / (i + 1)
-                remaining = (len(new_ids) - (i + 1)) * avg
-                print(f"--- ПРОГРЕСС: {i+1}/{len(new_ids)} | Вставлено: {inserted_total} | Осталось: {remaining/60:.1f} мин ---")
-        
-        # Вставляем остаток
-        if vacancies_batch:
-            inserted = insert_vacancies_batch(vacancies_batch)
-            inserted_total += inserted
-            print(f"\n📦 Последняя вставка: {inserted} новых вакансий")
-        
-        total_time = time.time() - start_total
-        print("\n" + "=" * 80)
-        print("ЗАВЕРШЕНО")
-        print("=" * 80)
-        print(f"Всего новых вакансий обработано: {len(new_ids)}")
-        print(f"Успешно вставлено: {inserted_total}")
-        print(f"Ошибок: {len(errors)}")
-        print(f"⏱️ Время: {total_time/60:.1f} мин")
+    except Exception as e:
+        print(f"❌ Ошибка страницы {page+1}: {e}")
+        continue
 
-print("\n🔚 СКРИПТ ЗАВЕРШИЛ РАБОТУ")
+# Фильтрация новых ID
+new_ids = [vid for vid in all_vacancy_ids if vid not in existing_ids]
+print(f"\n📊 ИТОГИ СБОРА:")
+print(f"   Всего ID: {len(all_vacancy_ids)}")
+print(f"   Новых ID: {len(new_ids)}")
+
+if not new_ids:
+    print("✅ Нет новых вакансий для загрузки")
+    exit(0)
+
+print("\n🔄 Сбор полных данных...")
+vacancies_batch = []
+errors = []
+start_total = time.time()
+inserted_total = 0
+
+for i, vac_id in enumerate(new_ids):
+    print(f"[{i+1}/{len(new_ids)}] {vac_id}")
+    
+    try:
+        add_delay()  # Задержка между запросами деталей
+        response = get_with_retry(session, f"{BASE_URL}/vacancies/{vac_id}")
+        
+        if response.status_code == 200:
+            vacancy = response.json()
+            
+            lat, lng, coords_source = enrich_with_coordinates(vacancy)
+            main_industry, main_industry_id = enrich_with_industries(vacancy)
+            main_role, main_role_id = enrich_with_professional_roles(vacancy)
+            
+            salary_currency = vacancy.get('salary', {}).get('currency') if vacancy.get('salary') else None
+            if salary_currency == 'BYR':
+                salary_currency = 'BYN'
+            
+            row = {
+                'id': vacancy.get('id'),
+                'name': vacancy.get('name'),
+                'published_at': vacancy.get('published_at'),
+                'created_at': vacancy.get('created_at'),
+                'initial_created_at': vacancy.get('initial_created_at'),
+                'alternate_url': vacancy.get('alternate_url'),
+                'salary_from': vacancy.get('salary', {}).get('from') if vacancy.get('salary') else None,
+                'salary_to': vacancy.get('salary', {}).get('to') if vacancy.get('salary') else None,
+                'salary_currency': salary_currency,
+                'salary_gross': vacancy.get('salary', {}).get('gross') if vacancy.get('salary') else None,
+                'area_id': vacancy.get('area', {}).get('id'),
+                'area_name': vacancy.get('area', {}).get('name'),
+                'lat': lat,
+                'lng': lng,
+                'coords_source': coords_source,
+                'address_raw': vacancy.get('address', {}).get('raw') if vacancy.get('address') else None,
+                'employer_id': vacancy.get('employer', {}).get('id'),
+                'employer_name': vacancy.get('employer', {}).get('name'),
+                'employer_accredited_it': vacancy.get('employer', {}).get('accredited_it_employer'),
+                'employer_trusted': vacancy.get('employer', {}).get('trusted'),
+                'employer_main_industry': main_industry,
+                'employer_main_industry_id': main_industry_id,
+                'professional_role': main_role,
+                'professional_role_id': main_role_id,
+                'experience_id': vacancy.get('experience', {}).get('id'),
+                'experience_name': vacancy.get('experience', {}).get('name'),
+                'employment_name': vacancy.get('employment', {}).get('name'),
+                'schedule_name': vacancy.get('schedule', {}).get('name'),
+                'accept_temporary': vacancy.get('accept_temporary'),
+                'accept_labor_contract': vacancy.get('accept_labor_contract'),
+                'internship': vacancy.get('internship'),
+                'night_shifts': vacancy.get('night_shifts'),
+                'work_format': ', '.join([f.get('name', '') for f in vacancy.get('work_format', [])]),
+                'working_hours': ', '.join([h.get('name', '') for h in vacancy.get('working_hours', [])]),
+                'work_schedule_by_days': ', '.join([s.get('name', '') for s in vacancy.get('work_schedule_by_days', [])]),
+                'key_skills': ', '.join([s.get('name', '') for s in vacancy.get('key_skills', [])]),
+                'has_test': vacancy.get('has_test'),
+                'test_required': vacancy.get('test', {}).get('required') if vacancy.get('test') else None,
+                'archived': vacancy.get('archived'),
+                'response_letter_required': vacancy.get('response_letter_required'),
+                'premium': vacancy.get('premium'),
+                'billing_type': vacancy.get('billing_type', {}).get('id') if vacancy.get('billing_type') else None,
+            }
+            
+            vacancies_batch.append(row)
+            print(f"  ✅ OK (в батче: {len(vacancies_batch)})")
+            
+            if len(vacancies_batch) >= 50:
+                inserted = insert_vacancies_batch(vacancies_batch)
+                inserted_total += inserted
+                print(f"  💾 Вставлено: {inserted}")
+                vacancies_batch = []
+        else:
+            errors.append(vac_id)
+            print(f"  ❌ Статус: {response.status_code}")
+            
+    except Exception as e:
+        errors.append(vac_id)
+        print(f"  ❌ Ошибка: {e}")
+    
+    if (i + 1) % 50 == 0:
+        elapsed = time.time() - start_total
+        avg = elapsed / (i + 1)
+        remaining = (len(new_ids) - (i + 1)) * avg
+        print(f"--- Прогресс: {i+1}/{len(new_ids)} | Вставлено: {inserted_total} | Осталось: {remaining/60:.1f} мин ---")
+
+# Вставка остатка
+if vacancies_batch:
+    inserted = insert_vacancies_batch(vacancies_batch)
+    inserted_total += inserted
+    print(f"\n💾 Финальная вставка: {inserted}")
+
+total_time = time.time() - start_total
+print("\n" + "=" * 80)
+print("✅ ЗАВЕРШЕНО")
+print("=" * 80)
+print(f"Обработано: {len(new_ids)}")
+print(f"Вставлено: {inserted_total}")
+print(f"Ошибок: {len(errors)}")
+print(f"Время: {total_time/60:.1f} мин")
