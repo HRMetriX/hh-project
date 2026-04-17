@@ -6,6 +6,7 @@ from urllib3.util.retry import Retry
 import os
 from supabase import create_client, Client
 from dotenv import load_dotenv
+import json
 
 load_dotenv()
 
@@ -28,12 +29,85 @@ session.mount("https://", adapter)
 session.mount("http://", adapter)
 
 headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "keep-alive"
 }
 
 # Кэши
 city_coords_cache = {}
 employer_industries_cache = {}
+
+def diagnose_response(response, context=""):
+    """Детальная диагностика ответа API"""
+    print(f"\n🔍 ДИАГНОСТИКА ОТВЕТА [{context}]")
+    print(f"   Status Code: {response.status_code}")
+    print(f"   URL: {response.url}")
+    print(f"   Headers: {dict(response.headers)}")
+    
+    # Проверка на капчу
+    if 'captcha' in response.text.lower() or response.status_code == 403:
+        print("   ⚠️ ОБНАРУЖЕНА КАПЧА ИЛИ БЛОКИРОВКА!")
+        if 'X-Captcha-Required' in response.headers:
+            print(f"   X-Captcha-Required: {response.headers['X-Captcha-Required']}")
+    
+    # Проверка на редирект
+    if response.history:
+        print(f"   🔄 Были редиректы: {len(response.history)}")
+        for i, resp in enumerate(response.history):
+            print(f"      {i+1}: {resp.status_code} -> {resp.headers.get('Location', 'N/A')}")
+    
+    # Проверка на ошибки HH
+    try:
+        data = response.json()
+        if 'errors' in data:
+            print(f"   ❌ API вернул ошибки: {json.dumps(data['errors'], ensure_ascii=False, indent=2)}")
+        if 'description' in data and response.status_code != 200:
+            print(f"   📝 Описание ошибки: {data.get('description', 'N/A')}")
+    except:
+        print("   ⚠️ Ответ не является валидным JSON")
+        print(f"   Первые 500 символов ответа: {response.text[:500]}")
+    
+    return response
+
+def test_api_accessibility():
+    """Тестирование доступности API"""
+    print("\n🧪 ТЕСТИРОВАНИЕ ДОСТУПНОСТИ API")
+    
+    # Тест 1: Базовый запрос без параметров
+    print("\n1. Базовый запрос /vacancies")
+    try:
+        response = session.get(f"{BASE_URL}/vacancies", headers=headers, timeout=10)
+        diagnose_response(response, "базовый запрос")
+        if response.status_code == 200:
+            data = response.json()
+            print(f"   ✅ API отвечает. Найдено вакансий всего: {data.get('found', 'N/A')}")
+    except Exception as e:
+        print(f"   ❌ Ошибка соединения: {e}")
+    
+    # Тест 2: Запрос с минимальными фильтрами
+    print("\n2. Запрос с минимальными фильтрами (только Россия, без дат)")
+    try:
+        params = {"area": 113, "per_page": 1}
+        response = session.get(f"{BASE_URL}/vacancies", params=params, headers=headers, timeout=10)
+        diagnose_response(response, "минимальные фильтры")
+        if response.status_code == 200:
+            data = response.json()
+            print(f"   ✅ С фильтром area=113 найдено: {data.get('found', 'N/A')}")
+    except Exception as e:
+        print(f"   ❌ Ошибка: {e}")
+    
+    # Тест 3: Проверка dictionaries (справочники)
+    print("\n3. Проверка справочников API")
+    try:
+        response = session.get(f"{BASE_URL}/dictionaries", headers=headers, timeout=10)
+        if response.status_code == 200:
+            print("   ✅ Справочники доступны")
+        else:
+            print(f"   ⚠️ Статус справочников: {response.status_code}")
+    except Exception as e:
+        print(f"   ❌ Ошибка справочников: {e}")
 
 def get_city_coords(area_id):
     if area_id in city_coords_cache:
@@ -128,6 +202,15 @@ def insert_vacancies_batch(rows):
         print(f"Ошибка при вставке: {e}")
         return 0
 
+# ========== ОСНОВНОЙ КОД ==========
+
+print("=" * 80)
+print("ЕЖЕДНЕВНЫЙ СБОР ВАКАНСИЙ (С ДИАГНОСТИКОЙ)")
+print("=" * 80)
+
+# Сначала тестируем доступность API
+test_api_accessibility()
+
 # Параметры сбора
 analytics_roles = [10, 148, 150, 156, 164, 165]
 
@@ -136,10 +219,10 @@ today = datetime.now().date()
 yesterday = today - timedelta(days=1)
 
 date_from = yesterday.strftime("%Y-%m-%d")
-date_to = today.strftime("%Y-%m-%d")
+date_to = (today + timedelta(days=1)).strftime("%Y-%m-%d")  # +1 день чтобы захватить сегодня
 
-print("=" * 80)
-print("ЕЖЕДНЕВНЫЙ СБОР ВАКАНСИЙ")
+print("\n" + "=" * 80)
+print("ПАРАМЕТРЫ ПОИСКА")
 print("=" * 80)
 print(f"Период: {date_from} - {date_to}")
 print(f"Роли: {analytics_roles}")
@@ -158,23 +241,84 @@ params = {
     "page": 0
 }
 
-# Получаем первую страницу
-print("Запрос первой страницы...")
+print("\n" + "=" * 80)
+print("ЗАПРОС К API")
+print("=" * 80)
+print(f"Параметры запроса: {json.dumps(params, ensure_ascii=False, indent=2)}")
+
+# Получаем первую страницу с диагностикой
+print("\nЗапрос первой страницы...")
 try:
     response = session.get(f"{BASE_URL}/vacancies", params=params, headers=headers, timeout=30)
+    diagnose_response(response, "основной запрос")
     data = response.json()
 except Exception as e:
-    print(f"Ошибка: {e}")
+    print(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+    
+    # Пробуем запрос без дат для проверки
+    print("\n🔧 ПРОБУЕМ ЗАПРОС БЕЗ ДАТ (для диагностики)...")
+    test_params = params.copy()
+    del test_params["date_from"]
+    del test_params["date_to"]
+    try:
+        test_response = session.get(f"{BASE_URL}/vacancies", params=test_params, headers=headers, timeout=30)
+        diagnose_response(test_response, "тестовый запрос без дат")
+        test_data = test_response.json()
+        print(f"   Без фильтра дат найдено: {test_data.get('found', 0)} вакансий")
+    except Exception as test_e:
+        print(f"   ❌ Даже тестовый запрос упал: {test_e}")
+    
     raise
 
 total_found = data.get('found', 0)
 pages = min(data.get('pages', 0), 20)
 
-print(f"Всего вакансий в HH: {total_found}")
-print(f"Страниц: {pages}")
+print(f"\n📊 РЕЗУЛЬТАТЫ ПОИСКА:")
+print(f"   Всего вакансий в HH: {total_found}")
+print(f"   Доступно страниц: {pages}")
+print(f"   Вакансий на первой странице: {len(data.get('items', []))}")
+
+# Проверяем, есть ли хоть что-то в items
+if total_found == 0 and len(data.get('items', [])) == 0:
+    print("\n⚠️ АНАЛИЗ ПРИЧИН НУЛЕВОГО РЕЗУЛЬТАТА:")
+    print("   1. Проверяем валидность professional_role ID")
+    
+    # Проверяем, существуют ли такие роли
+    try:
+        roles_response = session.get(f"{BASE_URL}/professional_roles", headers=headers, timeout=10)
+        if roles_response.status_code == 200:
+            all_roles = {r['id']: r['name'] for r in roles_response.json().get('categories', []) 
+                        for item in r.get('roles', []) if 'roles' in r 
+                        for r in [item]}
+            for role_id in analytics_roles:
+                if role_id in all_roles:
+                    print(f"      ✅ Роль {role_id}: {all_roles[role_id]}")
+                else:
+                    print(f"      ❌ Роль {role_id}: НЕ НАЙДЕНА В СПРАВОЧНИКЕ!")
+    except:
+        pass
+    
+    print(f"   2. Фильтр 'only_with_salary': {params['only_with_salary']}")
+    print(f"   3. Фильтр 'area': {params['area']} (Россия)")
+    print(f"   4. Даты: {date_from} - {date_to}")
+    
+    # Тестовый запрос без зарплаты
+    print("\n🔧 ПРОВЕРКА БЕЗ ФИЛЬТРА ЗАРПЛАТЫ:")
+    test_params = params.copy()
+    test_params["only_with_salary"] = False
+    test_params["per_page"] = 1
+    try:
+        test_response = session.get(f"{BASE_URL}/vacancies", params=test_params, headers=headers, timeout=30)
+        test_data = test_response.json()
+        print(f"   Без фильтра зарплаты найдено: {test_data.get('found', 0)} вакансий")
+        if test_data.get('found', 0) > 0:
+            print("   👉 ПРОБЛЕМА В ФИЛЬТРЕ ЗАРПЛАТЫ - за период нет вакансий с указанной ЗП")
+    except:
+        pass
 
 if total_found == 0:
-    print("Нет вакансий за указанный период")
+    print("\n✅ СКРИПТ ЗАВЕРШЕН: Нет вакансий за указанный период")
+    print("   Это нормально, если за вчера не было релевантных публикаций")
 else:
     # Собираем ID всех вакансий
     all_vacancy_ids = []
@@ -281,6 +425,7 @@ else:
                 else:
                     errors.append(vac_id)
                     print(f"  ❌ Ошибка {response.status_code}")
+                    diagnose_response(response, f"вакансия {vac_id}")
                     
             except Exception as e:
                 errors.append(vac_id)
@@ -308,3 +453,5 @@ else:
         print(f"Успешно вставлено: {inserted_total}")
         print(f"Ошибок: {len(errors)}")
         print(f"⏱️ Время: {total_time/60:.1f} мин")
+
+print("\n🔚 СКРИПТ ЗАВЕРШИЛ РАБОТУ")
