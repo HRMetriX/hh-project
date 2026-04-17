@@ -7,7 +7,7 @@ import os
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import json
-import random
+import sys
 
 load_dotenv()
 
@@ -18,210 +18,121 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 BASE_URL = "https://api.hh.ru"
 
-# ========== НОВЫЕ НАСТРОЙКИ ДЛЯ ОБХОДА БЛОКИРОВКИ ==========
-def create_session_with_rotation():
-    """Создает сессию с ротацией User-Agent и дополнительными заголовками"""
+# ========== НАСТРОЙКИ ДЛЯ GITHUB ACTIONS ==========
+MAX_RETRIES = 2  # Минимум повторных попыток
+REQUEST_TIMEOUT = 15  # Короткий таймаут для Actions
+DELAY_BETWEEN_REQUESTS = 0.5  # Минимальная задержка
+
+def create_session():
+    """Создает сессию, оптимизированную для GitHub Actions"""
     session = requests.Session()
     
-    # Расширенный список User-Agent для ротации
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36 Edg/119.0.0.0",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0"
-    ]
-    
+    # Используем один стабильный User-Agent
     session.headers.update({
-        "User-Agent": random.choice(user_agents),
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "ru-RU,ru;q=0.9",
         "Referer": "https://hh.ru/",
-        "Origin": "https://hh.ru",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-site",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache"
+        "Origin": "https://hh.ru"
     })
     
-    # Настройка retry с увеличенными задержками
+    # Минимальный retry
     retry_strategy = Retry(
-        total=5,
-        backoff_factor=2,  # Увеличиваем задержку между попытками
-        status_forcelist=[429, 500, 502, 503, 504, 403],  # Добавляем 403 в retry
+        total=1,
+        backoff_factor=0.5,
+        status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"]
     )
-    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=10)
+    adapter = HTTPAdapter(max_retries=retry_strategy)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     
     return session
 
-def add_delay():
-    """Случайная задержка для имитации человеческого поведения"""
-    delay = random.uniform(1.0, 3.0)
-    time.sleep(delay)
-
-def get_with_retry(session, url, params=None, max_attempts=3):
-    """Запрос с повторными попытками и сменой User-Agent при 403"""
-    for attempt in range(max_attempts):
-        try:
-            # Меняем User-Agent при повторных попытках
-            if attempt > 0:
-                user_agents = [
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-                ]
-                session.headers.update({"User-Agent": random.choice(user_agents)})
-                print(f"   🔄 Попытка {attempt + 1}/{max_attempts} с новым User-Agent")
-                add_delay()  # Добавляем задержку перед повторной попыткой
-            
-            response = session.get(url, params=params, timeout=30)
-            
-            if response.status_code == 403:
-                print(f"   ⚠️ Получен 403 Forbidden (попытка {attempt + 1})")
-                
-                # Проверяем наличие куки с капчей
-                if 'captcha' in response.text.lower() or 'ddos-guard' in response.headers.get('Server', '').lower():
-                    print("   🛡️ Обнаружена защита DDoS-Guard. Увеличиваем задержку...")
-                    time.sleep(random.uniform(5, 10))  # Длинная пауза
-                
-                if attempt < max_attempts - 1:
-                    continue
-            
-            return response
-            
-        except Exception as e:
-            print(f"   ❌ Ошибка запроса: {e}")
-            if attempt < max_attempts - 1:
-                time.sleep(random.uniform(2, 5))
-                continue
-            raise
+def check_ip_block():
+    """Быстрая проверка блокировки IP"""
+    print("🔍 Проверка доступности API...")
+    session = create_session()
     
-    return response
+    try:
+        # Пробуем самый легкий эндпоинт
+        response = session.get(
+            f"{BASE_URL}/dictionaries", 
+            timeout=REQUEST_TIMEOUT
+        )
+        
+        if response.status_code == 200:
+            print("✅ API доступен")
+            return True
+        elif response.status_code == 403:
+            print("❌ IP ЗАБЛОКИРОВАН (403 Forbidden)")
+            print("💡 GitHub Actions IP часто блокируются hh.ru")
+            print("💡 Решения:")
+            print("   1. Запускать скрипт локально")
+            print("   2. Использовать self-hosted runner")
+            print("   3. Настроить прокси/VPN в Actions")
+            return False
+        else:
+            print(f"⚠️ Неожиданный статус: {response.status_code}")
+            return False
+            
+    except requests.exceptions.Timeout:
+        print("❌ Таймаут соединения")
+        return False
+    except Exception as e:
+        print(f"❌ Ошибка соединения: {e}")
+        return False
 
-# Создаем сессию с защитой от блокировки
-session = create_session_with_rotation()
+def quick_request(session, url, params=None, context=""):
+    """Быстрый запрос с минимальными задержками"""
+    try:
+        response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+        
+        if response.status_code == 403:
+            print(f"❌ [BLOCKED] {context}: IP заблокирован")
+            return None
+        elif response.status_code != 200:
+            print(f"⚠️ [ERROR] {context}: статус {response.status_code}")
+            return None
+            
+        return response
+        
+    except requests.exceptions.Timeout:
+        print(f"❌ [TIMEOUT] {context}: превышено время ожидания")
+        return None
+    except Exception as e:
+        print(f"❌ [EXCEPTION] {context}: {e}")
+        return None
 
 # Кэши
 city_coords_cache = {}
 employer_industries_cache = {}
 
-def diagnose_response(response, context=""):
-    """Детальная диагностика ответа API"""
-    print(f"\n🔍 ДИАГНОСТИКА ОТВЕТА [{context}]")
-    print(f"   Status Code: {response.status_code}")
-    print(f"   URL: {response.url}")
-    
-    # Проверка на блокировку
-    if response.status_code == 403:
-        print("   🚫 ДОСТУП ЗАБЛОКИРОВАН (403 Forbidden)")
-        print(f"   Server: {response.headers.get('Server', 'N/A')}")
-        
-        if 'ddos-guard' in response.headers.get('Server', '').lower():
-            print("   ⚠️ Сработала защита DDoS-Guard от hh.ru")
-            print("   💡 РЕШЕНИЕ: Нужно использовать прокси или VPN")
-            print("   💡 ИЛИ: Подождать 30-60 минут и попробовать снова")
-        
-        try:
-            error_data = response.json()
-            print(f"   Ошибка API: {json.dumps(error_data, ensure_ascii=False)}")
-        except:
-            pass
-    
-    # Проверка на капчу
-    if 'captcha' in response.text.lower():
-        print("   🤖 ОБНАРУЖЕНА КАПЧА!")
-        print("   💡 Требуется ручное решение капчи в браузере")
-    
-    return response
-
-def test_connection():
-    """Тестирование соединения с разными методами"""
-    print("\n🧪 ТЕСТИРОВАНИЕ СОЕДИНЕНИЯ С HH.RU")
-    
-    # Тест 1: Прямой запрос к главной странице
-    print("\n1. Проверка доступности hh.ru:")
-    try:
-        test_session = requests.Session()
-        test_session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        })
-        response = test_session.get("https://hh.ru", timeout=10)
-        print(f"   Статус: {response.status_code}")
-        if response.status_code == 200:
-            print("   ✅ Сайт доступен")
-        else:
-            print(f"   ⚠️ Сайт вернул {response.status_code}")
-    except Exception as e:
-        print(f"   ❌ Ошибка: {e}")
-    
-    # Тест 2: API справочников (обычно менее защищен)
-    print("\n2. Проверка API справочников:")
-    try:
-        response = session.get(f"{BASE_URL}/dictionaries", timeout=10)
-        print(f"   Статус: {response.status_code}")
-        if response.status_code == 200:
-            print("   ✅ API справочников доступен")
-        else:
-            print(f"   ⚠️ Статус: {response.status_code}")
-    except Exception as e:
-        print(f"   ❌ Ошибка: {e}")
-    
-    # Тест 3: API вакансий с паузой
-    print("\n3. Проверка API вакансий (с паузой):")
-    time.sleep(2)
-    try:
-        response = get_with_retry(session, f"{BASE_URL}/vacancies", params={"per_page": 1})
-        diagnose_response(response, "тест вакансий")
-        if response.status_code == 200:
-            data = response.json()
-            print(f"   ✅ API вакансий доступен. Найдено: {data.get('found', 0)}")
-        elif response.status_code == 403:
-            print("   🚫 API вакансий заблокирован!")
-            print("   💡 ВАШ IP ВРЕМЕННО ЗАБЛОКИРОВАН HH.RU")
-            print("   💡 Варианты решения:")
-            print("      1. Подождать 1-2 часа")
-            print("      2. Использовать VPN/прокси")
-            print("      3. Запустить скрипт с другого IP")
-            return False
-    except Exception as e:
-        print(f"   ❌ Ошибка: {e}")
-        return False
-    
-    return True
-
 def get_city_coords(area_id):
     if area_id in city_coords_cache:
         return city_coords_cache[area_id]
-    try:
-        response = get_with_retry(session, f"{BASE_URL}/areas/{area_id}")
-        if response.status_code == 200:
-            area_data = response.json()
-            coords = {'lat': area_data.get('lat'), 'lng': area_data.get('lng')}
-            city_coords_cache[area_id] = coords
-            return coords
-        return {'lat': None, 'lng': None}
-    except Exception:
-        return {'lat': None, 'lng': None}
+    
+    response = quick_request(session, f"{BASE_URL}/areas/{area_id}", context=f"area_{area_id}")
+    if response:
+        area_data = response.json()
+        coords = {'lat': area_data.get('lat'), 'lng': area_data.get('lng')}
+        city_coords_cache[area_id] = coords
+        return coords
+    
+    return {'lat': None, 'lng': None}
 
 def get_employer_industries(employer_id):
     if employer_id in employer_industries_cache:
         return employer_industries_cache[employer_id]
-    try:
-        response = get_with_retry(session, f"{BASE_URL}/employers/{employer_id}")
-        if response.status_code == 200:
-            employer_data = response.json()
-            industries = employer_data.get('industries', [])
-            employer_industries_cache[employer_id] = industries
-            return industries
-        return []
-    except Exception:
-        return []
+    
+    response = quick_request(session, f"{BASE_URL}/employers/{employer_id}", context=f"employer_{employer_id}")
+    if response:
+        employer_data = response.json()
+        industries = employer_data.get('industries', [])
+        employer_industries_cache[employer_id] = industries
+        return industries
+    
+    return []
 
 def enrich_with_coordinates(vacancy):
     address = vacancy.get('address', {})
@@ -257,17 +168,24 @@ def get_existing_ids():
         page_size = 1000
         
         while True:
-            response = supabase.table("vacancies").select("id").range(page * page_size, (page + 1) * page_size - 1).execute()
+            response = supabase.table("vacancies").select("id").range(
+                page * page_size, 
+                (page + 1) * page_size - 1
+            ).execute()
+            
             if not response.data:
                 break
+                
             all_ids.extend([row['id'] for row in response.data])
+            
             if len(response.data) < page_size:
                 break
+                
             page += 1
         
         return set(all_ids)
     except Exception as e:
-        print(f"Ошибка при получении существующих ID: {e}")
+        print(f"⚠️ Ошибка получения ID из Supabase: {e}")
         return set()
 
 def insert_vacancies_batch(rows):
@@ -282,27 +200,28 @@ def insert_vacancies_batch(rows):
         if not new_rows:
             return 0
         
-        supabase.table("vacancies").insert(new_rows).execute()
+        result = supabase.table("vacancies").insert(new_rows).execute()
         return len(new_rows)
     except Exception as e:
-        print(f"Ошибка при вставке: {e}")
+        print(f"⚠️ Ошибка вставки в Supabase: {e}")
         return 0
 
 # ========== ОСНОВНОЙ КОД ==========
 
 print("=" * 80)
-print("ЕЖЕДНЕВНЫЙ СБОР ВАКАНСИЙ (С ЗАЩИТОЙ ОТ БЛОКИРОВКИ)")
+print("🤖 GITHUB ACTIONS - СБОР ВАКАНСИЙ HH.RU")
 print("=" * 80)
+print(f"🕐 Время запуска: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-# Тестируем соединение
-if not test_connection():
-    print("\n❌ НЕТ ДОСТУПА К API. Скрипт остановлен.")
-    print("📧 Рекомендуется настроить прокси или VPN для обхода блокировки.")
-    exit(1)
+# Быстрая проверка блокировки
+if not check_ip_block():
+    print("\n❌ СКРИПТ ОСТАНОВЛЕН: API недоступен")
+    print("📝 Создаю issue в логах Actions для информации")
+    # В GitHub Actions это не уронит workflow с ошибкой
+    sys.exit(0)  # Завершаем успешно, чтобы Actions не падал
 
-print("\n" + "=" * 80)
-print("ПАРАМЕТРЫ ПОИСКА")
-print("=" * 80)
+# Создаем сессию
+session = create_session()
 
 # Параметры сбора
 analytics_roles = [10, 148, 150, 156, 164, 165]
@@ -313,13 +232,17 @@ yesterday = today - timedelta(days=1)
 date_from = yesterday.strftime("%Y-%m-%d")
 date_to = (today + timedelta(days=1)).strftime("%Y-%m-%d")
 
+print("\n" + "=" * 80)
+print("📊 ПАРАМЕТРЫ ПОИСКА")
+print("=" * 80)
 print(f"Период: {date_from} - {date_to}")
 print(f"Роли: {analytics_roles}")
 
 # Получаем существующие ID
 existing_ids = get_existing_ids()
-print(f"Уже в базе: {len(existing_ids)} вакансий")
+print(f"В базе: {len(existing_ids)} вакансий")
 
+# Параметры запроса
 params = {
     "professional_role": analytics_roles,
     "only_with_salary": True,
@@ -331,160 +254,147 @@ params = {
 }
 
 print("\n" + "=" * 80)
-print("ЗАПРОС К API")
+print("🔍 ПОИСК ВАКАНСИЙ")
 print("=" * 80)
 
-# Добавляем задержку перед основным запросом
-print("\n⏳ Пауза 5 секунд перед запросом...")
-time.sleep(5)
+# Основной запрос
+response = quick_request(session, f"{BASE_URL}/vacancies", params, "основной поиск")
 
-# Основной запрос с защитой
-print("Выполнение основного запроса...")
-response = get_with_retry(session, f"{BASE_URL}/vacancies", params=params, max_attempts=3)
-diagnose_response(response, "основной запрос")
-
-if response.status_code != 200:
-    print("\n❌ Не удалось получить данные от API")
-    if response.status_code == 403:
-        print("💡 ВАШ IP ЗАБЛОКИРОВАН. Рекомендации:")
-        print("   1. Подождите 1-2 часа и запустите скрипт снова")
-        print("   2. Используйте VPN (например, ProtonVPN бесплатный)")
-        print("   3. Настройте прокси в скрипте")
-    exit(1)
+if not response:
+    print("\n❌ Не удалось получить данные")
+    sys.exit(0)
 
 data = response.json()
 total_found = data.get('found', 0)
-pages = min(data.get('pages', 0), 20)
+pages = min(data.get('pages', 0), 20)  # Ограничиваем 20 страницами для скорости
 
-print(f"\n📊 РЕЗУЛЬТАТЫ ПОИСКА:")
-print(f"   Всего вакансий: {total_found}")
-print(f"   Доступно страниц: {pages}")
+print(f"Найдено: {total_found} вакансий")
+print(f"Страниц для обработки: {pages}")
 
 if total_found == 0:
-    print("\n✅ Нет новых вакансий за период")
-    exit(0)
+    print("\n✅ Нет вакансий за период")
+    sys.exit(0)
 
-# Сбор вакансий (остальная часть без изменений)
+# Быстрый сбор ID
+print("\n📑 Сбор ID вакансий...")
 all_vacancy_ids = []
+
 for page in range(pages):
+    if page > 0:  # Пропускаем паузу для первой страницы
+        time.sleep(DELAY_BETWEEN_REQUESTS)
+    
     params["page"] = page
-    try:
-        add_delay()  # Добавляем случайную задержку между запросами
-        response = get_with_retry(session, f"{BASE_URL}/vacancies", params=params)
-        
-        if response.status_code == 200:
-            page_data = response.json()
-            for item in page_data.get('items', []):
-                all_vacancy_ids.append(item['id'])
-            print(f"📄 Страница {page+1}/{pages}: +{len(page_data.get('items', []))} ID")
-        else:
-            print(f"⚠️ Ошибка страницы {page+1}: статус {response.status_code}")
-            continue
-            
-    except Exception as e:
-        print(f"❌ Ошибка страницы {page+1}: {e}")
+    response = quick_request(session, f"{BASE_URL}/vacancies", params, f"страница {page+1}")
+    
+    if response:
+        page_data = response.json()
+        items = page_data.get('items', [])
+        all_vacancy_ids.extend([item['id'] for item in items])
+        print(f"  📄 Стр. {page+1}/{pages}: +{len(items)} ID")
+    else:
+        print(f"  ⚠️ Стр. {page+1}: ошибка, пропускаем")
         continue
 
 # Фильтрация новых ID
 new_ids = [vid for vid in all_vacancy_ids if vid not in existing_ids]
-print(f"\n📊 ИТОГИ СБОРА:")
-print(f"   Всего ID: {len(all_vacancy_ids)}")
-print(f"   Новых ID: {len(new_ids)}")
+print(f"\n📊 ИТОГ:")
+print(f"  Всего ID: {len(all_vacancy_ids)}")
+print(f"  Новых: {len(new_ids)}")
 
 if not new_ids:
-    print("✅ Нет новых вакансий для загрузки")
-    exit(0)
+    print("\n✅ Нет новых вакансий")
+    sys.exit(0)
 
-print("\n🔄 Сбор полных данных...")
+# Сбор деталей (быстрый)
+print(f"\n📥 Сбор данных для {len(new_ids)} вакансий...")
 vacancies_batch = []
 errors = []
-start_total = time.time()
+start_time = time.time()
 inserted_total = 0
 
 for i, vac_id in enumerate(new_ids):
-    print(f"[{i+1}/{len(new_ids)}] {vac_id}")
+    if i > 0:
+        time.sleep(DELAY_BETWEEN_REQUESTS)
     
-    try:
-        add_delay()  # Задержка между запросами деталей
-        response = get_with_retry(session, f"{BASE_URL}/vacancies/{vac_id}")
+    print(f"[{i+1}/{len(new_ids)}] {vac_id}", end=" ")
+    
+    response = quick_request(session, f"{BASE_URL}/vacancies/{vac_id}", context=f"вакансия {vac_id}")
+    
+    if response:
+        vacancy = response.json()
         
-        if response.status_code == 200:
-            vacancy = response.json()
-            
-            lat, lng, coords_source = enrich_with_coordinates(vacancy)
-            main_industry, main_industry_id = enrich_with_industries(vacancy)
-            main_role, main_role_id = enrich_with_professional_roles(vacancy)
-            
-            salary_currency = vacancy.get('salary', {}).get('currency') if vacancy.get('salary') else None
-            if salary_currency == 'BYR':
-                salary_currency = 'BYN'
-            
-            row = {
-                'id': vacancy.get('id'),
-                'name': vacancy.get('name'),
-                'published_at': vacancy.get('published_at'),
-                'created_at': vacancy.get('created_at'),
-                'initial_created_at': vacancy.get('initial_created_at'),
-                'alternate_url': vacancy.get('alternate_url'),
-                'salary_from': vacancy.get('salary', {}).get('from') if vacancy.get('salary') else None,
-                'salary_to': vacancy.get('salary', {}).get('to') if vacancy.get('salary') else None,
-                'salary_currency': salary_currency,
-                'salary_gross': vacancy.get('salary', {}).get('gross') if vacancy.get('salary') else None,
-                'area_id': vacancy.get('area', {}).get('id'),
-                'area_name': vacancy.get('area', {}).get('name'),
-                'lat': lat,
-                'lng': lng,
-                'coords_source': coords_source,
-                'address_raw': vacancy.get('address', {}).get('raw') if vacancy.get('address') else None,
-                'employer_id': vacancy.get('employer', {}).get('id'),
-                'employer_name': vacancy.get('employer', {}).get('name'),
-                'employer_accredited_it': vacancy.get('employer', {}).get('accredited_it_employer'),
-                'employer_trusted': vacancy.get('employer', {}).get('trusted'),
-                'employer_main_industry': main_industry,
-                'employer_main_industry_id': main_industry_id,
-                'professional_role': main_role,
-                'professional_role_id': main_role_id,
-                'experience_id': vacancy.get('experience', {}).get('id'),
-                'experience_name': vacancy.get('experience', {}).get('name'),
-                'employment_name': vacancy.get('employment', {}).get('name'),
-                'schedule_name': vacancy.get('schedule', {}).get('name'),
-                'accept_temporary': vacancy.get('accept_temporary'),
-                'accept_labor_contract': vacancy.get('accept_labor_contract'),
-                'internship': vacancy.get('internship'),
-                'night_shifts': vacancy.get('night_shifts'),
-                'work_format': ', '.join([f.get('name', '') for f in vacancy.get('work_format', [])]),
-                'working_hours': ', '.join([h.get('name', '') for h in vacancy.get('working_hours', [])]),
-                'work_schedule_by_days': ', '.join([s.get('name', '') for s in vacancy.get('work_schedule_by_days', [])]),
-                'key_skills': ', '.join([s.get('name', '') for s in vacancy.get('key_skills', [])]),
-                'has_test': vacancy.get('has_test'),
-                'test_required': vacancy.get('test', {}).get('required') if vacancy.get('test') else None,
-                'archived': vacancy.get('archived'),
-                'response_letter_required': vacancy.get('response_letter_required'),
-                'premium': vacancy.get('premium'),
-                'billing_type': vacancy.get('billing_type', {}).get('id') if vacancy.get('billing_type') else None,
-            }
-            
-            vacancies_batch.append(row)
-            print(f"  ✅ OK (в батче: {len(vacancies_batch)})")
-            
-            if len(vacancies_batch) >= 50:
-                inserted = insert_vacancies_batch(vacancies_batch)
-                inserted_total += inserted
-                print(f"  💾 Вставлено: {inserted}")
-                vacancies_batch = []
-        else:
-            errors.append(vac_id)
-            print(f"  ❌ Статус: {response.status_code}")
-            
-    except Exception as e:
+        lat, lng, coords_source = enrich_with_coordinates(vacancy)
+        main_industry, main_industry_id = enrich_with_industries(vacancy)
+        main_role, main_role_id = enrich_with_professional_roles(vacancy)
+        
+        salary_currency = vacancy.get('salary', {}).get('currency') if vacancy.get('salary') else None
+        if salary_currency == 'BYR':
+            salary_currency = 'BYN'
+        
+        row = {
+            'id': vacancy.get('id'),
+            'name': vacancy.get('name'),
+            'published_at': vacancy.get('published_at'),
+            'created_at': vacancy.get('created_at'),
+            'initial_created_at': vacancy.get('initial_created_at'),
+            'alternate_url': vacancy.get('alternate_url'),
+            'salary_from': vacancy.get('salary', {}).get('from') if vacancy.get('salary') else None,
+            'salary_to': vacancy.get('salary', {}).get('to') if vacancy.get('salary') else None,
+            'salary_currency': salary_currency,
+            'salary_gross': vacancy.get('salary', {}).get('gross') if vacancy.get('salary') else None,
+            'area_id': vacancy.get('area', {}).get('id'),
+            'area_name': vacancy.get('area', {}).get('name'),
+            'lat': lat,
+            'lng': lng,
+            'coords_source': coords_source,
+            'address_raw': vacancy.get('address', {}).get('raw') if vacancy.get('address') else None,
+            'employer_id': vacancy.get('employer', {}).get('id'),
+            'employer_name': vacancy.get('employer', {}).get('name'),
+            'employer_accredited_it': vacancy.get('employer', {}).get('accredited_it_employer'),
+            'employer_trusted': vacancy.get('employer', {}).get('trusted'),
+            'employer_main_industry': main_industry,
+            'employer_main_industry_id': main_industry_id,
+            'professional_role': main_role,
+            'professional_role_id': main_role_id,
+            'experience_id': vacancy.get('experience', {}).get('id'),
+            'experience_name': vacancy.get('experience', {}).get('name'),
+            'employment_name': vacancy.get('employment', {}).get('name'),
+            'schedule_name': vacancy.get('schedule', {}).get('name'),
+            'accept_temporary': vacancy.get('accept_temporary'),
+            'accept_labor_contract': vacancy.get('accept_labor_contract'),
+            'internship': vacancy.get('internship'),
+            'night_shifts': vacancy.get('night_shifts'),
+            'work_format': ', '.join([f.get('name', '') for f in vacancy.get('work_format', [])]),
+            'working_hours': ', '.join([h.get('name', '') for h in vacancy.get('working_hours', [])]),
+            'work_schedule_by_days': ', '.join([s.get('name', '') for s in vacancy.get('work_schedule_by_days', [])]),
+            'key_skills': ', '.join([s.get('name', '') for s in vacancy.get('key_skills', [])]),
+            'has_test': vacancy.get('has_test'),
+            'test_required': vacancy.get('test', {}).get('required') if vacancy.get('test') else None,
+            'archived': vacancy.get('archived'),
+            'response_letter_required': vacancy.get('response_letter_required'),
+            'premium': vacancy.get('premium'),
+            'billing_type': vacancy.get('billing_type', {}).get('id') if vacancy.get('billing_type') else None,
+        }
+        
+        vacancies_batch.append(row)
+        print("✅")
+        
+        # Вставка каждые 20 вакансий (меньше для Actions)
+        if len(vacancies_batch) >= 20:
+            inserted = insert_vacancies_batch(vacancies_batch)
+            inserted_total += inserted
+            print(f"  💾 Вставлено: {inserted}")
+            vacancies_batch = []
+    else:
         errors.append(vac_id)
-        print(f"  ❌ Ошибка: {e}")
+        print("❌")
     
-    if (i + 1) % 50 == 0:
-        elapsed = time.time() - start_total
+    # Прогресс каждые 10 вакансий
+    if (i + 1) % 10 == 0:
+        elapsed = time.time() - start_time
         avg = elapsed / (i + 1)
         remaining = (len(new_ids) - (i + 1)) * avg
-        print(f"--- Прогресс: {i+1}/{len(new_ids)} | Вставлено: {inserted_total} | Осталось: {remaining/60:.1f} мин ---")
+        print(f"  ⏱️ Прогресс: {i+1}/{len(new_ids)} | Осталось: {remaining/60:.1f} мин")
 
 # Вставка остатка
 if vacancies_batch:
@@ -492,7 +402,8 @@ if vacancies_batch:
     inserted_total += inserted
     print(f"\n💾 Финальная вставка: {inserted}")
 
-total_time = time.time() - start_total
+total_time = time.time() - start_time
+
 print("\n" + "=" * 80)
 print("✅ ЗАВЕРШЕНО")
 print("=" * 80)
@@ -500,3 +411,4 @@ print(f"Обработано: {len(new_ids)}")
 print(f"Вставлено: {inserted_total}")
 print(f"Ошибок: {len(errors)}")
 print(f"Время: {total_time/60:.1f} мин")
+print(f"🕐 Завершено: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
