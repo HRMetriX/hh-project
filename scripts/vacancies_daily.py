@@ -6,17 +6,81 @@ from urllib3.util.retry import Retry
 import os
 from supabase import create_client, Client
 from dotenv import load_dotenv
-import json
 import sys
 
 load_dotenv()
 
-# Подключение к Supabase
+# Секреты (из .env или GitHub Secrets)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+HH_ACCESS_TOKEN = os.getenv("HH_ACCESS_TOKEN")
+
+# Проверка наличия всех секретов
+if not all([SUPABASE_URL, SUPABASE_KEY, HH_ACCESS_TOKEN]):
+    print("❌ Отсутствуют обязательные переменные окружения")
+    print("   Проверь: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, HH_ACCESS_TOKEN")
+    sys.exit(1)
+
+# Подключение к Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 BASE_URL = "https://api.hh.ru"
+
+# Открытые данные (можно прямо в коде)
+HH_USER_AGENT = "CustomMonitor/1.0 (olegjerryborisov@yandex.ru)"
+
+# ========== МАППЕРЫ ДЛЯ СОВМЕСТИМОСТИ С БД ==========
+EMPLOYMENT_MAPPING = {
+    "Полная": "Полная занятость",
+    "Частичная": "Частичная занятость",
+    "Проект": "Проектная работа",
+    "Вахта": "Вахта",
+    "Подработка": "Подработка",
+    "Стажировка": "Стажировка",
+}
+
+SCHEDULE_MAPPING = {
+    "5/2": "Полный день",
+    "6/1": "Полный день",
+    "2/2": "Сменный график",
+    "Сменный": "Сменный график",
+    "Свободный": "Гибкий график",
+    "Гибкий": "Гибкий график",
+}
+
+def map_employment_name(api_value):
+    """Приводит значение employment_form.name к формату БД"""
+    if api_value is None:
+        return None
+    mapped = EMPLOYMENT_MAPPING.get(api_value)
+    if mapped is None:
+        print(f"  ⚠️ Новое значение employment_name: '{api_value}' (будет сохранено как есть)")
+        return api_value
+    return mapped
+
+def map_schedule_name(vacancy):
+    """
+    Формирует schedule_name из новых полей API.
+    Приоритет: удалёнка → work_schedule_by_days → None
+    """
+    # 1. Проверяем формат работы (приоритет)
+    work_format = vacancy.get('work_format', [])
+    if work_format and len(work_format) > 0:
+        format_name = work_format[0].get('name')
+        if format_name == 'Удалённо':
+            return "Удаленная работа"
+    
+    # 2. Берём из work_schedule_by_days
+    work_schedule = vacancy.get('work_schedule_by_days', [])
+    if work_schedule and len(work_schedule) > 0:
+        api_value = work_schedule[0].get('name')
+        mapped = SCHEDULE_MAPPING.get(api_value)
+        if mapped is None:
+            print(f"  ⚠️ Новое значение schedule_name: '{api_value}' (будет сохранено как есть)")
+            return api_value
+        return mapped
+    
+    return None
 
 # ========== НАСТРОЙКИ ДЛЯ GITHUB ACTIONS ==========
 MAX_RETRIES = 2  # Минимум повторных попыток
@@ -24,22 +88,21 @@ REQUEST_TIMEOUT = 15  # Короткий таймаут для Actions
 DELAY_BETWEEN_REQUESTS = 0.5  # Минимальная задержка
 
 def create_session():
-    """Создает сессию, оптимизированную для GitHub Actions"""
+    """Создает сессию с авторизацией через токен приложения"""
     session = requests.Session()
     
-    # Используем один стабильный User-Agent
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": HH_USER_AGENT,
+        "Authorization": f"Bearer {HH_ACCESS_TOKEN}",
         "Accept": "application/json",
         "Accept-Language": "ru-RU,ru;q=0.9",
         "Referer": "https://hh.ru/",
         "Origin": "https://hh.ru"
     })
     
-    # Минимальный retry
     retry_strategy = Retry(
-        total=1,
-        backoff_factor=0.5,
+        total=MAX_RETRIES,
+        backoff_factor=1,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"]
     )
@@ -66,6 +129,8 @@ def check_ip_block():
             return True
         elif response.status_code == 403:
             print("❌ IP ЗАБЛОКИРОВАН (403 Forbidden)")
+            if 'X-Captcha-Required' in response.headers:
+                print(f"   🔐 Требуется капча: {response.headers['X-Captcha-Required']}")
             print("💡 GitHub Actions IP часто блокируются hh.ru")
             print("💡 Решения:")
             print("   1. Запускать скрипт локально")
@@ -84,12 +149,25 @@ def check_ip_block():
         return False
 
 def quick_request(session, url, params=None, context=""):
-    """Быстрый запрос с минимальными задержками"""
+    """Быстрый запрос с расширенным логированием"""
     try:
         response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
         
         if response.status_code == 403:
-            print(f"❌ [BLOCKED] {context}: IP заблокирован")
+            print(f"❌ [BLOCKED] {context}: IP заблокирован (403)")
+            if 'X-Captcha-Required' in response.headers:
+                print(f"   🔐 Требуется капча: {response.headers['X-Captcha-Required']}")
+            return None
+        elif response.status_code == 400:
+            print(f"⚠️ [BAD REQUEST] {context}: неверные параметры")
+            try:
+                error_data = response.json()
+                print(f"   📝 {error_data.get('description', 'Нет описания')}")
+            except:
+                pass
+            return None
+        elif response.status_code == 429:
+            print(f"⚠️ [RATE LIMIT] {context}: превышен лимит запросов")
             return None
         elif response.status_code != 200:
             print(f"⚠️ [ERROR] {context}: статус {response.status_code}")
@@ -98,10 +176,13 @@ def quick_request(session, url, params=None, context=""):
         return response
         
     except requests.exceptions.Timeout:
-        print(f"❌ [TIMEOUT] {context}: превышено время ожидания")
+        print(f"❌ [TIMEOUT] {context}: превышено время ожидания ({REQUEST_TIMEOUT}с)")
+        return None
+    except requests.exceptions.ConnectionError:
+        print(f"❌ [CONNECTION] {context}: ошибка соединения")
         return None
     except Exception as e:
-        print(f"❌ [EXCEPTION] {context}: {e}")
+        print(f"❌ [EXCEPTION] {context}: {type(e).__name__}: {str(e)[:100]}")
         return None
 
 # Кэши
@@ -183,6 +264,7 @@ def get_existing_ids():
                 
             page += 1
         
+        print(f"📋 Загружено {len(all_ids)} существующих ID из БД")
         return set(all_ids)
     except Exception as e:
         print(f"⚠️ Ошибка получения ID из Supabase: {e}")
@@ -217,18 +299,18 @@ print(f"🕐 Время запуска: {datetime.now().strftime('%Y-%m-%d %H:%M
 if not check_ip_block():
     print("\n❌ СКРИПТ ОСТАНОВЛЕН: API недоступен")
     print("📝 Создаю issue в логах Actions для информации")
-    # В GitHub Actions это не уронит workflow с ошибкой
-    sys.exit(0)  # Завершаем успешно, чтобы Actions не падал
+    sys.exit(0)
 
 # Создаем сессию
 session = create_session()
+print("🔐 Сессия создана с авторизацией через токен приложения")
 
 # Параметры сбора
 analytics_roles = [10, 148, 150, 156, 164, 165]
 
 # Даты
 today = datetime.now().date()
-yesterday = today - timedelta(days=1)
+yesterday = today - timedelta(days=10)
 date_from = yesterday.strftime("%Y-%m-%d")
 date_to = (today + timedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -256,6 +338,7 @@ params = {
 print("\n" + "=" * 80)
 print("🔍 ПОИСК ВАКАНСИЙ")
 print("=" * 80)
+print(f"📤 Параметры: area={params['area']}, per_page={params['per_page']}, даты: {date_from} - {date_to}")
 
 # Основной запрос
 response = quick_request(session, f"{BASE_URL}/vacancies", params, "основной поиск")
@@ -268,19 +351,20 @@ data = response.json()
 total_found = data.get('found', 0)
 pages = min(data.get('pages', 0), 20)  # Ограничиваем 20 страницами для скорости
 
-print(f"Найдено: {total_found} вакансий")
-print(f"Страниц для обработки: {pages}")
+print(f"✅ Основной запрос успешен")
+print(f"   Найдено: {total_found} вакансий")
+print(f"   Доступно страниц: {data.get('pages', 0)} (обработаем: {pages})")
 
 if total_found == 0:
     print("\n✅ Нет вакансий за период")
     sys.exit(0)
 
 # Быстрый сбор ID
-print("\n📑 Сбор ID вакансий...")
+print(f"\n📑 Сбор ID вакансий (ограничение: {pages} страниц)...")
 all_vacancy_ids = []
 
 for page in range(pages):
-    if page > 0:  # Пропускаем паузу для первой страницы
+    if page > 0:
         time.sleep(DELAY_BETWEEN_REQUESTS)
     
     params["page"] = page
@@ -290,23 +374,25 @@ for page in range(pages):
         page_data = response.json()
         items = page_data.get('items', [])
         all_vacancy_ids.extend([item['id'] for item in items])
-        print(f"  📄 Стр. {page+1}/{pages}: +{len(items)} ID")
+        print(f"  📄 Стр. {page+1}/{pages}: +{len(items)} ID (всего: {len(all_vacancy_ids)})")
     else:
         print(f"  ⚠️ Стр. {page+1}: ошибка, пропускаем")
         continue
 
 # Фильтрация новых ID
 new_ids = [vid for vid in all_vacancy_ids if vid not in existing_ids]
-print(f"\n📊 ИТОГ:")
-print(f"  Всего ID: {len(all_vacancy_ids)}")
+print(f"\n📊 ИТОГ СБОРА ID:")
+print(f"  Всего собрано: {len(all_vacancy_ids)}")
+print(f"  Уже в базе: {len(existing_ids)}")
 print(f"  Новых: {len(new_ids)}")
 
 if not new_ids:
     print("\n✅ Нет новых вакансий")
     sys.exit(0)
 
-# Сбор деталей (быстрый)
-print(f"\n📥 Сбор данных для {len(new_ids)} вакансий...")
+# Сбор деталей
+print(f"\n📥 Сбор детальных данных для {len(new_ids)} вакансий...")
+print(f"⏱️ Ожидаемое время: ~{len(new_ids) * DELAY_BETWEEN_REQUESTS / 60:.1f} мин")
 vacancies_batch = []
 errors = []
 start_time = time.time()
@@ -358,8 +444,8 @@ for i, vac_id in enumerate(new_ids):
             'professional_role_id': main_role_id,
             'experience_id': vacancy.get('experience', {}).get('id'),
             'experience_name': vacancy.get('experience', {}).get('name'),
-            'employment_name': vacancy.get('employment', {}).get('name'),
-            'schedule_name': vacancy.get('schedule', {}).get('name'),
+            'employment_name': map_employment_name(vacancy.get('employment_form', {}).get('name')),
+            'schedule_name': map_schedule_name(vacancy),
             'accept_temporary': vacancy.get('accept_temporary'),
             'accept_labor_contract': vacancy.get('accept_labor_contract'),
             'internship': vacancy.get('internship'),
@@ -379,11 +465,11 @@ for i, vac_id in enumerate(new_ids):
         vacancies_batch.append(row)
         print("✅")
         
-        # Вставка каждые 20 вакансий (меньше для Actions)
+        # Вставка каждые 20 вакансий
         if len(vacancies_batch) >= 20:
             inserted = insert_vacancies_batch(vacancies_batch)
             inserted_total += inserted
-            print(f"  💾 Вставлено: {inserted}")
+            print(f"  💾 Вставлено в БД: {inserted} (всего: {inserted_total})")
             vacancies_batch = []
     else:
         errors.append(vac_id)
@@ -394,21 +480,34 @@ for i, vac_id in enumerate(new_ids):
         elapsed = time.time() - start_time
         avg = elapsed / (i + 1)
         remaining = (len(new_ids) - (i + 1)) * avg
-        print(f"  ⏱️ Прогресс: {i+1}/{len(new_ids)} | Осталось: {remaining/60:.1f} мин")
+        success_rate = ((i + 1 - len(errors)) / (i + 1)) * 100
+        print(f"  ⏱️ Прогресс: {i+1}/{len(new_ids)} | Успех: {success_rate:.0f}% | Вставлено: {inserted_total} | Осталось: {remaining/60:.1f} мин")
 
 # Вставка остатка
 if vacancies_batch:
     inserted = insert_vacancies_batch(vacancies_batch)
     inserted_total += inserted
-    print(f"\n💾 Финальная вставка: {inserted}")
+    print(f"\n💾 Финальная вставка: {inserted} (всего: {inserted_total})")
 
 total_time = time.time() - start_time
 
 print("\n" + "=" * 80)
 print("✅ ЗАВЕРШЕНО")
 print("=" * 80)
-print(f"Обработано: {len(new_ids)}")
-print(f"Вставлено: {inserted_total}")
-print(f"Ошибок: {len(errors)}")
-print(f"Время: {total_time/60:.1f} мин")
+print(f"📊 СТАТИСТИКА:")
+print(f"  Обработано вакансий: {len(new_ids)}")
+print(f"  Успешно вставлено: {inserted_total}")
+print(f"  Ошибок: {len(errors)}")
+if len(new_ids) > 0:
+    print(f"  Процент успеха: {(inserted_total/len(new_ids))*100:.1f}%")
+print(f"  Общее время: {total_time/60:.1f} мин")
+if len(new_ids) > 0:
+    print(f"  Среднее время на вакансию: {total_time/len(new_ids):.2f} сек")
 print(f"🕐 Завершено: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+if errors:
+    print(f"\n⚠️ Ошибки при обработке ID:")
+    for err_id in errors[:10]:
+        print(f"  - {err_id}")
+    if len(errors) > 10:
+        print(f"  ... и ещё {len(errors) - 10}")
