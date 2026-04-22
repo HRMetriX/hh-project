@@ -309,8 +309,8 @@ print("🔐 Сессия создана с авторизацией через �
 analytics_roles = [10, 148, 150, 156, 164, 165]
 
 # Даты
- = datetime.now().date()
-yesterday =  - timedelta(days=1)
+today = datetime.now().date()
+yesterday =  - timedelta(days=2)
 date_from = yesterday.strftime("%Y-%m-%d")
 date_to = ( + timedelta(days=1)).strftime("%Y-%m-%d")
 
