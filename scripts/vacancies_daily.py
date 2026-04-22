@@ -310,9 +310,9 @@ analytics_roles = [10, 148, 150, 156, 164, 165]
 
 # Даты
 today = datetime.now().date()
-yesterday =  - timedelta(days=2)
+yesterday = today - timedelta(days=1)
 date_from = yesterday.strftime("%Y-%m-%d")
-date_to = ( + timedelta(days=1)).strftime("%Y-%m-%d")
+date_to = (today + timedelta(days=1)).strftime("%Y-%m-%d")
 
 print("\n" + "=" * 80)
 print("📊 ПАРАМЕТРЫ ПОИСКА")
