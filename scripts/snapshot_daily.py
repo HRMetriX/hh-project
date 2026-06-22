@@ -81,6 +81,58 @@ def hh_request(session, url, params=None):
 
 
 # ==========================================================
+# РЕГИОНЫ
+# ==========================================================
+
+def get_top_level_region_ids():
+    """Получает ID всех регионов первого уровня (включая Москву, СПб и республики)"""
+    response = requests.get("https://api.hh.ru/areas/113")
+    if response.status_code != 200:
+        print("❌ Не удалось загрузить список регионов")
+        return ["113"]  # fallback
+
+    russia = response.json()
+    region_ids = []
+    for area in russia["areas"]:
+        region_ids.append(area["id"])
+    return region_ids
+
+
+def collect_ids_by_regions(session, region_ids):
+    """Собирает ID вакансий по списку регионов"""
+    all_ids = set()
+    analytics_roles = [10, 148, 150, 156, 164, 165]
+
+    for i, region_id in enumerate(region_ids):
+        page = 0
+        while page < 20:
+            params = {
+                "professional_role": analytics_roles,
+                "only_with_salary": True,
+                "area": region_id,
+                "per_page": 100,
+                "page": page
+            }
+            data = hh_request(session, f"{BASE_URL}/vacancies", params)
+            if not data or not data.get("items"):
+                break
+
+            ids = {v["id"] for v in data["items"]}
+            all_ids.update(ids)
+
+            if len(data["items"]) < 100:
+                break
+
+            page += 1
+            time.sleep(0.3)
+
+        if (i + 1) % 20 == 0:
+            print(f"  🌍 Обработано регионов: {i+1}/{len(region_ids)}")
+
+    return list(all_ids)
+
+
+# ==========================================================
 # SUPABASE
 # ==========================================================
 
@@ -133,10 +185,10 @@ print(f"🕐 Время запуска: {datetime.now().strftime('%Y-%m-%d %H:%M
 print(f"🌍 Запрос: все активные вакансии аналитиков с зарплатой")
 
 session = create_session()
-
 today = datetime.now().date()
 analytics_roles = [10, 148, 150, 156, 164, 165]
 
+# Быстрый запрос по всей России
 params = {
     "professional_role": analytics_roles,
     "only_with_salary": True,
@@ -145,32 +197,34 @@ params = {
     "page": 0
 }
 
-# Первый запрос — получаем метаданные
 first = hh_request(session, f"{BASE_URL}/vacancies", params)
 if not first:
     print("❌ Не удалось получить данные от hh.ru")
     sys.exit(0)
 
 total_found = first.get("found", 0)
-pages = min(first.get("pages", 0), 20)  # лимит API без разбивки по регионам
-print(f"✅ Найдено активных вакансий: {total_found} (обработаем до {pages * 100})")
+pages = min(first.get("pages", 0), 20)
+print(f"✅ Найдено активных вакансий: {total_found}")
 
-# Сбор всех ID
-vacancy_ids = []
-for page in range(pages):
-    if page > 0:
-        time.sleep(0.5)
-    params["page"] = page
-    data = hh_request(session, f"{BASE_URL}/vacancies", params)
-    if data:
-        ids = [x["id"] for x in data.get("items", [])]
-        vacancy_ids.extend(ids)
-        print(f"  📄 Страница {page+1}/{pages}: +{len(ids)} ID")
-    else:
-        print(f"  ⚠️ Страница {page+1}: ошибка")
-
-print(f"\n📊 ИТОГ:")
-print(f"  Собрано ID: {len(vacancy_ids)}")
+if total_found < 2000:
+    # Быстрый путь
+    vacancy_ids = []
+    for page in range(pages):
+        if page > 0:
+            time.sleep(0.5)
+        params["page"] = page
+        data = hh_request(session, f"{BASE_URL}/vacancies", params)
+        if data:
+            ids = [x["id"] for x in data.get("items", [])]
+            vacancy_ids.extend(ids)
+    print(f"  🚀 Собрано ID (быстрый режим): {len(vacancy_ids)}")
+else:
+    # Полный сбор по регионам
+    print("⚠️ Достигнут лимит 2000 → переключаемся на разбивку по регионам")
+    region_ids = get_top_level_region_ids()
+    print(f"  🗺️ Всего регионов: {len(region_ids)}")
+    vacancy_ids = collect_ids_by_regions(session, region_ids)
+    print(f"  🚀 Собрано ID (полный режим): {len(vacancy_ids)}")
 
 if not vacancy_ids:
     print("✅ Нет активных вакансий")
@@ -189,8 +243,6 @@ for vid in vacancy_ids:
         "salary_avg_rub": salary.get("salary_avg_rub"),
         "salary_avg_net_rub": salary.get("salary_avg_net_rub")
     })
-
-print(f"  Подготовлено snapshot'ов: {len(snapshot_rows)}")
 
 # Вставка
 inserted = insert_snapshots(snapshot_rows)
