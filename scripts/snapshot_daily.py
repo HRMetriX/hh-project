@@ -110,7 +110,12 @@ def insert_snapshots(rows):
     if not rows:
         return 0
     try:
-        response = supabase.table("vacancy_snapshots").insert(rows).execute()
+        response = (
+            supabase
+            .table("vacancy_snapshots")
+            .upsert(rows, on_conflict="vacancy_id,snapshot_date")
+            .execute()
+        )
         return len(response.data)
     except Exception as e:
         print(f"❌ Ошибка вставки snapshot: {e}")
