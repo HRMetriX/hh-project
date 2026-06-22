@@ -1,51 +1,39 @@
 name: Daily Vacancy Snapshot
 
-
 on:
+  # Запуск после успешного завершения основного сбора
   workflow_run:
     workflows:
       - "Daily Vacancies Collect"
-
     types:
       - completed
 
+  # Ручной запуск через GitHub UI (кнопка "Run workflow")
+  workflow_dispatch:
 
 jobs:
-
   snapshot:
-
-    # запускаем только если основной сбор завершился успешно
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Запускаем только если основной сбор завершился успешно
+    # (но пропускаем эту проверку при ручном запуске)
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
 
     runs-on: ubuntu-latest
 
-
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
-
       - name: Setup Python
         uses: actions/setup-python@v5
-
         with:
           python-version: '3.11'
-
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-
       - name: Run snapshot collector
-
         env:
-
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-
           HH_ACCESS_TOKEN: ${{ secrets.HH_ACCESS_TOKEN }}
-
-
         run: python scripts/snapshot_daily.py
