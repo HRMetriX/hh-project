@@ -35,6 +35,9 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 CSV_FILE = "data/ru_regions.csv"
 TABLE_NAME = "regions"
 
+# Увеличиваем максимальный размер поля CSV (полигоны могут быть огромными)
+csv.field_size_limit(sys.maxsize)
+
 # ---------------------------------------------------------------------------
 # Транслитерация кириллицы в латиницу
 # ---------------------------------------------------------------------------
@@ -73,16 +76,15 @@ def load_regions():
     print(f"\n📂 Чтение {CSV_FILE}...")
 
     with open(CSV_FILE, 'r', encoding='utf-8') as f:
-        reader = csv.reader(f, delimiter=';')
-        rows = list(reader)
-
-    if not rows:
-        print("❌ Файл пуст")
-        sys.exit(1)
+        # Читаем все строки как текст
+        lines = f.readlines()
+    
+    print(f"   Прочитано строк: {len(lines)}")
 
     # Первая строка — заголовки
-    original_headers = [h.strip() for h in rows[0]]
-    print(f"   Оригинальные заголовки: {original_headers}")
+    header_line = lines[0].strip()
+    original_headers = [h.strip() for h in header_line.split(';')]
+    print(f"   Оригинальные заголовки ({len(original_headers)}): {original_headers}")
 
     # Транслитерируем заголовки
     latin_headers = [transliterate(h) for h in original_headers]
@@ -96,8 +98,9 @@ def load_regions():
         supabase.rpc('exec_sql', {
             'query': f'DROP TABLE IF EXISTS {TABLE_NAME} CASCADE;'
         }).execute()
-    except Exception:
-        pass  # Игнорируем если функции нет или таблицы нет
+        print("   Старая таблица удалена")
+    except Exception as e:
+        print(f"   ⚠️ Не удалось удалить старую таблицу: {e}")
 
     # Создаём таблицу с текстовыми колонками + id
     columns_def = ",\n    ".join([f"{col} TEXT" for col in latin_headers])
@@ -114,32 +117,32 @@ def load_regions():
     except Exception as e:
         print(f"❌ Ошибка создания таблицы: {e}")
         print("💡 Убедись, что в Supabase есть функция exec_sql")
-        print("   Выполни в SQL Editor:")
-        print("""
-        CREATE OR REPLACE FUNCTION exec_sql(query TEXT) 
-        RETURNS VOID AS $$
-        BEGIN
-            EXECUTE query;
-        END;
-        $$ LANGUAGE plpgsql SECURITY DEFINER;
-        """)
         sys.exit(1)
 
-    # 3. Загружаем данные
+    # 3. Загружаем данные построчно
     print(f"\n📤 Загрузка данных...")
-    data_rows = rows[1:]  # Пропускаем заголовок
-    total = len(data_rows)
+    
+    total = len(lines) - 1  # минус заголовок
     inserted = 0
+    errors = 0
 
-    for i, row in enumerate(data_rows):
-        if not any(row):  # Пропускаем пустые строки
+    for i, line in enumerate(lines[1:], start=1):
+        line = line.strip()
+        if not line:
             continue
 
+        # Разбиваем строку на поля по разделителю ;
+        parts = line.split(';')
+        
         # Собираем словарь с данными
         record = {}
         for j, header in enumerate(latin_headers):
-            if j < len(row):
-                record[header] = row[j].strip()
+            if j < len(parts):
+                val = parts[j].strip()
+                # Убираем внешние кавычки если есть
+                if val.startswith('"') and val.endswith('"'):
+                    val = val[1:-1]
+                record[header] = val
             else:
                 record[header] = None
 
@@ -147,20 +150,21 @@ def load_regions():
             supabase.table(TABLE_NAME).insert(record).execute()
             inserted += 1
         except Exception as e:
-            # Выводим только первую ошибку подробно, остальное кратко
-            if i < 3:
-                print(f"  ⚠️ Строка {i+2}: {str(e)[:100]}")
+            errors += 1
+            if errors <= 3:
+                print(f"  ⚠️ Строка {i+1}: {str(e)[:150]}")
 
-        if (i + 1) % 20 == 0:
-            print(f"  📦 Прогресс: {i+1}/{total}")
+        if (i) % 20 == 0:
+            print(f"  📦 Прогресс: {i}/{total} (ошибок: {errors})")
 
     print(f"\n✅ Загружено строк: {inserted} из {total}")
+    if errors > 0:
+        print(f"⚠️ Ошибок: {errors}")
 
     # 4. Проверяем результат
     try:
-        result = supabase.table(TABLE_NAME).select("id", count="exact").limit(1).execute()
-        count = result.count if hasattr(result, 'count') else '?'
-        print(f"📊 Всего записей в таблице: {count}")
+        result = supabase.table(TABLE_NAME).select("*", count="exact").limit(1).execute()
+        print(f"📊 Записей в таблице: {result.count}")
     except Exception:
         pass
 
