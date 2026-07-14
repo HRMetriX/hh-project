@@ -1,24 +1,12 @@
 """
 Загрузка справочника регионов РФ из CSV в Supabase.
-
-Назначение:
-    - Читает сырой CSV с полигонами регионов (разделитель ";")
-    - Загружает данные в готовую таблицу regions
-    - При повторе — перезаписывает существующие записи (UPSERT по id)
-
-Запуск:
-    python scripts/load_regions.py
 """
 
 import sys
 import os
-import re
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-# ---------------------------------------------------------------------------
-# Загрузка конфигурации
-# ---------------------------------------------------------------------------
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -32,14 +20,9 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 CSV_FILE = "data/ru_regions.csv"
 TABLE_NAME = "regions"
-
-# Заголовки из CSV (уже на латинице, транслитерация не нужна)
 HEADERS = ['name', 'type', 'id', 'region', 'coords_type', 'coords']
 
 
-# ---------------------------------------------------------------------------
-# Основная логика
-# ---------------------------------------------------------------------------
 def load_regions():
     print("=" * 60)
     print("🏗️  ЗАГРУЗКА РЕГИОНОВ РФ В SUPABASE")
@@ -53,70 +36,61 @@ def load_regions():
     
     print(f"   Прочитано строк: {len(lines)}")
 
-    # Пропускаем заголовок (первая строка)
+    # Пропускаем заголовок
     data_lines = lines[1:]
     
-    # 2. Парсим данные
-    print("\n📤 Парсинг и загрузка данных...")
+    # 2. Отладка: проверим первую строку
+    print("\n🔍 Отладка первой строки:")
+    first_line = data_lines[0].strip()
+    print(f"   Длина строки: {len(first_line)} символов")
     
-    total = len(data_lines)
-    inserted = 0
-    errors = 0
-    error_ids = []
-
-    for i, line in enumerate(data_lines, start=1):
-        line = line.strip()
-        if not line:
-            continue
-
-        # Разбиваем строку на поля по разделителю ;
-        parts = line.split(';')
+    parts = first_line.split(';')
+    print(f"   Полей после split(';'): {len(parts)}")
+    
+    if len(parts) >= 6:
+        coords_raw = parts[5]
+        print(f"   coords_raw начинается с: {coords_raw[:80]}")
+        print(f"   coords_raw заканчивается на: {coords_raw[-40:]}")
+        print(f"   Длина coords_raw: {len(coords_raw)} символов")
         
-        # Собираем словарь с данными
-        record = {}
-        for j, header in enumerate(HEADERS):
-            if j < len(parts):
-                val = parts[j].strip()
-                # Убираем внешние кавычки если есть
-                if val.startswith('"') and val.endswith('"'):
-                    val = val[1:-1]
-                record[header] = val
-            else:
-                record[header] = None
-
-        try:
-            # UPSERT: вставить или обновить по id
-            supabase.table(TABLE_NAME).upsert(record, on_conflict='id').execute()
-            inserted += 1
-        except Exception as e:
-            errors += 1
-            error_ids.append(record.get('id', '?'))
-            if errors <= 5:
-                print(f"  ⚠️ Строка {i}: id={record.get('id')} — {str(e)[:150]}")
-
-        if i % 20 == 0:
-            print(f"  📦 Прогресс: {i}/{total} (успешно: {inserted}, ошибок: {errors})")
-
-    # 3. Итоги
-    print(f"\n{'='*60}")
-    print(f"✅ ЗАГРУЗКА ЗАВЕРШЕНА")
-    print(f"{'='*60}")
-    print(f"  Всего строк в CSV:    {total}")
-    print(f"  Успешно загружено:    {inserted}")
-    print(f"  Ошибок:               {errors}")
+        # Убираем кавычки
+        if coords_raw.startswith('"') and coords_raw.endswith('"'):
+            coords_clean = coords_raw[1:-1]
+            print(f"   После удаления кавычек, длина: {len(coords_clean)}")
+            print(f"   Начало: {coords_clean[:80]}")
+            print(f"   Конец: {coords_clean[-40:]}")
     
-    if error_ids:
-        print(f"  Проблемные id: {error_ids[:10]}")
-
-    # 4. Проверяем результат
+    # 3. Загружаем ТОЛЬКО первую строку для проверки
+    print("\n📤 Тестовая загрузка первой строки...")
+    
+    record = {}
+    for j, header in enumerate(HEADERS):
+        if j < len(parts):
+            val = parts[j].strip()
+            if val.startswith('"') and val.endswith('"'):
+                val = val[1:-1]
+            record[header] = val
+    
+    print(f"   Записываем id={record.get('id')}, region={record.get('region')}")
+    print(f"   Длина coords: {len(record.get('coords', ''))}")
+    
     try:
-        result = supabase.table(TABLE_NAME).select("*", count="exact").limit(1).execute()
-        print(f"\n📊 Всего записей в таблице: {result.count}")
-    except Exception:
-        pass
+        supabase.table(TABLE_NAME).upsert(record, on_conflict='id').execute()
+        print("   ✅ Первая строка загружена успешно")
+        
+        # Проверяем что сохранилось
+        result = supabase.table(TABLE_NAME).select("id, region, coords").eq("id", record['id']).execute()
+        if result.data:
+            saved = result.data[0]
+            print(f"   📊 Проверка: id={saved.get('id')}, region={saved.get('region')}")
+            print(f"   Длина coords в БД: {len(saved.get('coords', ''))}")
+            print(f"   Начало coords: {saved.get('coords', '')[:80]}")
+            print(f"   Конец coords: {saved.get('coords', '')[-40:]}")
+    except Exception as e:
+        print(f"   ❌ Ошибка: {e}")
 
-    print("\n✅ ГОТОВО")
-    return inserted
+    print("\n⏸️  Отладка завершена. Остальные строки пока не загружаем.")
+    print("   Если всё ок — убираем отладку и грузим все строки.")
 
 
 if __name__ == "__main__":
