@@ -1,13 +1,6 @@
 """
 Загрузка справочника регионов РФ из CSV в Supabase.
-
-Назначение:
-    - Читает CSV с полигонами регионов (разделитель ";")
-    - Загружает все строки в готовую таблицу regions
-    - Использует UPSERT — можно перезапускать без дубликатов
-
-Запуск:
-    python scripts/load_regions.py
+Загружаются ТОЛЬКО полигоны (coords_type = ru_regions_poly).
 """
 
 import sys
@@ -44,9 +37,23 @@ def load_regions():
     
     data_lines = lines[1:]  # Пропускаем заголовок
     total = len(data_lines)
-    print(f"   Строк данных: {total}")
+    print(f"   Всего строк данных: {total}")
 
-    # 2. Очищаем таблицу
+    # 2. Фильтруем — только полигоны
+    poly_lines = []
+    points_lines = []
+    
+    for line in data_lines:
+        if 'ru_regions_poly' in line:
+            poly_lines.append(line)
+        elif 'ru_regions_points' in line:
+            points_lines.append(line)
+    
+    print(f"   Полигонов: {len(poly_lines)}")
+    print(f"   Точек: {len(points_lines)}")
+    print(f"   → Загружаем только полигоны")
+
+    # 3. Очищаем таблицу
     print(f"\n🧹 Очистка таблицы {TABLE_NAME}...")
     try:
         supabase.table(TABLE_NAME).delete().neq("id", "0").execute()
@@ -54,13 +61,13 @@ def load_regions():
     except Exception as e:
         print(f"   ⚠️ {e}")
 
-    # 3. Загружаем данные
-    print(f"\n📤 Загрузка данных...")
+    # 4. Загружаем полигоны
+    print(f"\n📤 Загрузка полигонов...")
     
     inserted = 0
     errors = 0
 
-    for i, line in enumerate(data_lines, start=1):
+    for i, line in enumerate(poly_lines, start=1):
         line = line.strip()
         if not line:
             continue
@@ -86,19 +93,18 @@ def load_regions():
                 print(f"  ⚠️ Строка {i}: id={record.get('id')} — {str(e)[:120]}")
 
         if i % 20 == 0:
-            print(f"  📦 Прогресс: {i}/{total} (успешно: {inserted}, ошибок: {errors})")
+            print(f"  📦 Прогресс: {i}/{len(poly_lines)} (успешно: {inserted}, ошибок: {errors})")
 
-    # 4. Итоги
+    # 5. Итоги
     print(f"\n{'='*60}")
     print(f"✅ ЗАГРУЗКА ЗАВЕРШЕНА")
     print(f"{'='*60}")
-    print(f"  Строк в CSV:  {total}")
-    print(f"  Загружено:    {inserted}")
-    print(f"  Ошибок:       {errors}")
+    print(f"  Полигонов загружено: {inserted}")
+    print(f"  Ошибок:              {errors}")
 
     try:
         result = supabase.table(TABLE_NAME).select("*", count="exact").limit(1).execute()
-        print(f"  В таблице:    {result.count} записей")
+        print(f"  Записей в таблице:   {result.count}")
     except Exception:
         pass
 
