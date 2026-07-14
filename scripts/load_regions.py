@@ -32,7 +32,7 @@ if not all([SUPABASE_URL, SUPABASE_KEY]):
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-CSV_FILE = "ru_regions.csv"
+CSV_FILE = "data/ru_regions.csv"
 TABLE_NAME = "regions"
 
 # ---------------------------------------------------------------------------
