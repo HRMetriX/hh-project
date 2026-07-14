@@ -1,5 +1,13 @@
 """
 Загрузка справочника регионов РФ из CSV в Supabase.
+
+Назначение:
+    - Читает CSV с полигонами регионов (разделитель ";")
+    - Загружает все строки в готовую таблицу regions
+    - Использует UPSERT — можно перезапускать без дубликатов
+
+Запуск:
+    python scripts/load_regions.py
 """
 
 import sys
@@ -34,63 +42,67 @@ def load_regions():
     with open(CSV_FILE, 'r', encoding='utf-8') as f:
         lines = f.readlines()
     
-    print(f"   Прочитано строк: {len(lines)}")
+    data_lines = lines[1:]  # Пропускаем заголовок
+    total = len(data_lines)
+    print(f"   Строк данных: {total}")
 
-    # Пропускаем заголовок
-    data_lines = lines[1:]
-    
-    # 2. Отладка: проверим первую строку
-    print("\n🔍 Отладка первой строки:")
-    first_line = data_lines[0].strip()
-    print(f"   Длина строки: {len(first_line)} символов")
-    
-    parts = first_line.split(';')
-    print(f"   Полей после split(';'): {len(parts)}")
-    
-    if len(parts) >= 6:
-        coords_raw = parts[5]
-        print(f"   coords_raw начинается с: {coords_raw[:80]}")
-        print(f"   coords_raw заканчивается на: {coords_raw[-40:]}")
-        print(f"   Длина coords_raw: {len(coords_raw)} символов")
-        
-        # Убираем кавычки
-        if coords_raw.startswith('"') and coords_raw.endswith('"'):
-            coords_clean = coords_raw[1:-1]
-            print(f"   После удаления кавычек, длина: {len(coords_clean)}")
-            print(f"   Начало: {coords_clean[:80]}")
-            print(f"   Конец: {coords_clean[-40:]}")
-    
-    # 3. Загружаем ТОЛЬКО первую строку для проверки
-    print("\n📤 Тестовая загрузка первой строки...")
-    
-    record = {}
-    for j, header in enumerate(HEADERS):
-        if j < len(parts):
-            val = parts[j].strip()
-            if val.startswith('"') and val.endswith('"'):
-                val = val[1:-1]
-            record[header] = val
-    
-    print(f"   Записываем id={record.get('id')}, region={record.get('region')}")
-    print(f"   Длина coords: {len(record.get('coords', ''))}")
-    
+    # 2. Очищаем таблицу
+    print(f"\n🧹 Очистка таблицы {TABLE_NAME}...")
     try:
-        supabase.table(TABLE_NAME).upsert(record, on_conflict='id').execute()
-        print("   ✅ Первая строка загружена успешно")
-        
-        # Проверяем что сохранилось
-        result = supabase.table(TABLE_NAME).select("id, region, coords").eq("id", record['id']).execute()
-        if result.data:
-            saved = result.data[0]
-            print(f"   📊 Проверка: id={saved.get('id')}, region={saved.get('region')}")
-            print(f"   Длина coords в БД: {len(saved.get('coords', ''))}")
-            print(f"   Начало coords: {saved.get('coords', '')[:80]}")
-            print(f"   Конец coords: {saved.get('coords', '')[-40:]}")
+        supabase.table(TABLE_NAME).delete().neq("id", "0").execute()
+        print("   ✅ Таблица очищена")
     except Exception as e:
-        print(f"   ❌ Ошибка: {e}")
+        print(f"   ⚠️ {e}")
 
-    print("\n⏸️  Отладка завершена. Остальные строки пока не загружаем.")
-    print("   Если всё ок — убираем отладку и грузим все строки.")
+    # 3. Загружаем данные
+    print(f"\n📤 Загрузка данных...")
+    
+    inserted = 0
+    errors = 0
+
+    for i, line in enumerate(data_lines, start=1):
+        line = line.strip()
+        if not line:
+            continue
+
+        parts = line.split(';')
+        
+        record = {}
+        for j, header in enumerate(HEADERS):
+            if j < len(parts):
+                val = parts[j].strip()
+                if val.startswith('"') and val.endswith('"'):
+                    val = val[1:-1]
+                record[header] = val
+            else:
+                record[header] = None
+
+        try:
+            supabase.table(TABLE_NAME).upsert(record, on_conflict='id').execute()
+            inserted += 1
+        except Exception as e:
+            errors += 1
+            if errors <= 3:
+                print(f"  ⚠️ Строка {i}: id={record.get('id')} — {str(e)[:120]}")
+
+        if i % 20 == 0:
+            print(f"  📦 Прогресс: {i}/{total} (успешно: {inserted}, ошибок: {errors})")
+
+    # 4. Итоги
+    print(f"\n{'='*60}")
+    print(f"✅ ЗАГРУЗКА ЗАВЕРШЕНА")
+    print(f"{'='*60}")
+    print(f"  Строк в CSV:  {total}")
+    print(f"  Загружено:    {inserted}")
+    print(f"  Ошибок:       {errors}")
+
+    try:
+        result = supabase.table(TABLE_NAME).select("*", count="exact").limit(1).execute()
+        print(f"  В таблице:    {result.count} записей")
+    except Exception:
+        pass
+
+    print("\n✅ ГОТОВО")
 
 
 if __name__ == "__main__":
